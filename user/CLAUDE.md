@@ -79,9 +79,11 @@ design. The full contract, including the report and `BLOCKED` shapes, lives in t
 
 Sessions are stateless; continuity is a deliverable, not a hope.
 
-- **Committed and portable:** `docs/decisions/DECISIONS.md` (why the current shape exists)
-  and `docs/changelogs/` (what each session changed). These travel with the repo, so a
-  session on a server reads the same history as a session on the laptop.
+- **Committed and portable:** a decision log (why the current shape exists) and a changelog
+  directory (what each session changed). Defaults are `docs/decisions/DECISIONS.md` and
+  `docs/changelogs/`; a project that already uses another convention — `docs/adr/`, a root
+  `DECISIONS.md` — keeps it and declares it in `.claude/continuity.json`. These travel with
+  the repo, so a session on a server reads the same history as a session on the laptop.
 - **Per-agent, committed:** `reviewer` and `implementer` keep `memory: project`, writing to
   `.claude/agent-memory/<agent>/`. Commit that directory — it is institutional knowledge.
 - **Machine-local, automatic:** auto memory stays on. It does *not* sync between machines,
@@ -90,6 +92,8 @@ Sessions are stateless; continuity is a deliverable, not a hope.
 **End every working session that changed code, config, or docs by writing the changelog
 entry before the session ends.** A session that changed something and left no trace is an
 incomplete session.
+
+To set a repository up for this workflow, run `/orchestration-onboard` in it.
 
 ## Non-negotiables (every project)
 

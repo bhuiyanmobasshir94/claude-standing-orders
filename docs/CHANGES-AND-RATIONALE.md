@@ -175,7 +175,35 @@ characters so it cannot crowd out the session.
 
 ---
 
-## 5. Restructuring the project CLAUDE.md
+## 5. Generalizing the project layer
+
+The first version of this package shipped a project layer written directly for one
+Django/Celery/SES codebase. That made it a template only for that stack. The layer is now
+split in three:
+
+- **`project-template/`** — stack-agnostic. `CLAUDE.md` is a fill-in template whose comments
+  say what belongs in each section and what does not. The three rules use path globs that
+  cover the common source layouts across ecosystems, each headed by a note to adjust them.
+- **`examples/django-celery-ses-banking/`** — the previous, fully filled-in version, kept as
+  a worked reference. Filling a template is much easier next to a completed one.
+- **`/orchestration-onboard`** — a user-level skill that reads a repository, asks only for
+  what the code cannot reveal, proposes a plan, and writes nothing until approved.
+
+The hooks were also assuming a convention. `session-brief.mjs` originally hardcoded
+`docs/changelogs/` and `docs/decisions/DECISIONS.md`. It now resolves, in order: an explicit
+`.claude/continuity.json`, then a list of common layouts including `docs/adr/`, a root
+`DECISIONS.md`, and `changelogs/`. An ADR directory is summarized as a list of record titles
+rather than inlined. Files without a leading date sort by modification time. A repository
+with none of these produces no brief and no error.
+
+One rule was deliberately softened rather than generalized. "Never hard-delete" was a
+correct policy for the banking codebase but is not universal, so the template says: check
+how this project deletes before adding a delete path, and match it. A rule that is present
+but untrue in a given repository teaches Claude to discount the whole file.
+
+---
+
+## 6. Restructuring the project CLAUDE.md
 
 The original was 176 dense lines. Two changes:
 
@@ -195,7 +223,7 @@ Result: 113 lines, with the standards intact and loading when they are relevant.
 
 ---
 
-## 6. Verification performed on this package
+## 7. Verification performed on this package
 
 - All three `.mjs` files pass `node --check`.
 - `bootstrap.mjs` was run against a temp home **seeded with your actual `settings.json`**;
@@ -210,8 +238,11 @@ Result: 113 lines, with the standards intact and loading when they are relevant.
   preloaded skill resolving to a real file.
 - Both hooks were exercised against a realistic repo layout, and against malformed JSON,
   empty stdin, and a bare directory with no continuity files — all exit 0 without output.
+- Continuity discovery was tested against four repository shapes: an `docs/adr/` directory,
+  a root `DECISIONS.md` with undated changelog filenames, an explicit `.claude/continuity.json`
+  pointing at non-standard paths, and a repository with no continuity files at all.
 
-## 7. Version floors
+## 8. Version floors
 
 Opus 5 requires Claude Code **v2.1.219+**. The subagent spawn-depth and concurrency limits
 require v2.1.217+, subagent output scanning v2.1.210+, and background-by-default subagents

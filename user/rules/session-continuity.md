@@ -6,9 +6,11 @@ the repository — not in machine-local memory, which does not follow you to a s
 
 ## Session changelog (required whenever code, config, migrations, or docs changed)
 
-One file per session at `docs/changelogs/YYYY-MM-DD-<short-slug>.md`. If several sessions
-land on one day, keep the slugs distinct; never overwrite a prior session's file. Commit it
-in the same commit as the change it describes, so history and audit trail stay in lockstep.
+One file per session, named `YYYY-MM-DD-<short-slug>.md`, in this project's changelog
+directory — `docs/changelogs/` by default, or whatever `.claude/continuity.json` declares.
+If several sessions land on one day, keep the slugs distinct; never overwrite a prior
+session's file. Commit it in the same commit as the change it describes, so history and
+audit trail stay in lockstep.
 
 Cover, with concrete detail:
 
@@ -25,7 +27,8 @@ Never record secrets, API keys, OTPs, credentials, or PII in a changelog.
 
 ## Decision log (required when a choice constrains future work)
 
-Append to `docs/decisions/DECISIONS.md` when a session settles something a future session
+Append to this project's decision log — `docs/decisions/DECISIONS.md` by default, or an
+existing `docs/adr/` or root `DECISIONS.md` — when a session settles something a future session
 would otherwise re-litigate: an architectural direction, a rejected alternative, a
 deliberate constraint. Three or four lines each — date, decision, why, what it rules out.
 

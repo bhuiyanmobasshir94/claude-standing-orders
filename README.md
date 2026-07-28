@@ -13,8 +13,7 @@ node bootstrap.mjs install
 ```
 
 Then restart Claude Code and run `/context` to confirm the global `CLAUDE.md` and rules
-loaded. `INSTALL_PROMPT.md` has a prompt you can paste into Claude Code to do this and
-verify it for you.
+loaded. `INSTALL.md` has prompts you can paste into Claude Code to do this and verify it for you.
 
 Requires Claude Code **v2.1.219+** (Opus 5) and Node 18+.
 
@@ -29,7 +28,9 @@ user/                          → installs into ~/.claude/
     fast-implementer.md        Haiku — bounded mechanical changes
     reviewer.md                Sonnet · xhigh · read-only — findings with file:line
     verifier.md                Haiku · read-only — runs checks, reports evidence
-  skills/worker-contract/      preloaded into every worker: Task Packet, report, BLOCKED
+  skills/
+    worker-contract/           preloaded into every worker: Task Packet, report, BLOCKED
+    orchestration-onboard/     /orchestration-onboard — sets up any repo for the workflow
   rules/
     session-continuity.md      changelog and decision-log format (always loaded)
     documentation-accuracy.md  verify-against-source rules (loads on docs and markdown)
@@ -37,13 +38,16 @@ user/                          → installs into ~/.claude/
     session-brief.mjs          SessionStart — injects decisions + recent changelogs
     worker-ledger.mjs          SubagentStop — one line per worker completion
 
-project/                       → copy into a repository's .claude/ and root
-  CLAUDE.md                    Email Service backend: scale profile + non-negotiables
-  settings.json                deny/ask rules for secrets, force-push, migrations
-  rules/                       security · data-and-migrations · async-and-scale
+project-template/              → stack-agnostic starting point for any repository
+  CLAUDE.md                    fill-in template; judgment context, not a file tree
+  settings.json                deny secrets and force-push, ask before push
+  rules/                       security · data-and-migrations · reliability-and-performance
+
+examples/
+  django-celery-ses-banking/   a filled-in project layer, as a worked reference
 
 docs/CHANGES-AND-RATIONALE.md  what changed from the previous setup and why
-INSTALL_PROMPT.md              prompts to paste into Claude Code
+INSTALL.md                     prompts to paste into Claude Code
 bootstrap.mjs                  cross-platform installer
 ```
 
@@ -69,6 +73,11 @@ in a file that might not reach it.
 **Continuity in committed files.** Auto memory is machine-local and does not sync. Anything
 another machine needs to know is a file in the repository, surfaced at session start by the
 `session-brief` hook.
+
+**Conventions discovered, not imposed.** The hook finds a repository's changelog and
+decision log across the common layouts — `docs/changelogs/`, `docs/adr/`, a root
+`DECISIONS.md` — or reads `.claude/continuity.json` when a project declares its own. No
+repository has to adopt a directory name to benefit.
 
 ## Commands
 
