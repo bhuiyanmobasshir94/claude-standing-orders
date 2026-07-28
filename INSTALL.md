@@ -1,52 +1,11 @@
 # Instructions
 
-Three prompts. Run **A** once per repo update, **B** once per machine, **C** once per project.
+Two prompts. Run **A** once per machine, **B** once per project.
 Each is written to be pasted verbatim into Claude Code.
 
 ---
 
-## A — Update the orchestrator repo
-
-Run this from inside your `claude-orchestrator` clone, with the new package extracted
-somewhere Claude Code can read it.
-
-```
-Update this orchestrator repo from the package at <PATH-TO-EXTRACTED-PACKAGE>.
-
-Context: the project layer was previously written for one specific Django/Celery/SES
-codebase. This update generalizes it so any repository can use it, and preserves the
-old project-specific version as a worked example.
-
-Do this:
-
-1. Show me `git status`. If the tree is dirty, stop and tell me.
-2. Create a branch: chore/generalize-project-layer
-3. Apply these changes, showing me the diff for each before writing:
-   - DELETE the ./project directory
-   - ADD ./project-template/  (stack-agnostic CLAUDE.md, settings.json, rules/)
-   - ADD ./examples/django-celery-ses-banking/  (the old ./project content, unchanged)
-   - REPLACE ./user/hooks/session-brief.mjs  (now discovers changelog and decision
-     locations instead of assuming docs/changelogs and docs/decisions)
-   - ADD ./user/skills/orchestration-onboard/SKILL.md
-   - REPLACE ./user/CLAUDE.md, ./user/rules/session-continuity.md,
-     ./user/rules/documentation-accuracy.md  (wording made framework-neutral)
-   - REPLACE ./README.md, ./INSTALL.md, ./docs/CHANGES-AND-RATIONALE.md
-   - Leave ./bootstrap.mjs, ./user/settings.template.json, ./user/agents/*,
-     ./user/skills/worker-contract/* unchanged unless the package differs
-4. Verify before committing:
-   - `node --check` passes on bootstrap.mjs and both files in user/hooks/
-   - every .json in the repo parses
-   - every .md with YAML frontmatter parses, and no agent file sets `effort` on a
-     `model: haiku` agent
-   - `grep -riE "django|celery|IBBL|banking" user/ project-template/` returns nothing
-5. Commit with a message describing the generalization, and show me the final tree.
-
-Do not push. I will review and push myself.
-```
-
----
-
-## B — Install or update a machine
+## A — Install or update a machine
 
 Run from inside the repo on each machine — Mac, Windows, Linux, or a server.
 
@@ -91,7 +50,7 @@ markdown or docs file. It is path-scoped; that is correct, not a failed install.
 
 ---
 
-## C — Onboard a project
+## B — Onboard a project
 
 Once B is done, this is a single command inside any repository:
 

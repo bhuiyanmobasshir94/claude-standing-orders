@@ -46,10 +46,9 @@ project-template/              → stack-agnostic starting point for any reposit
 examples/
   django-celery-ses-banking/   a filled-in project layer, as a worked reference
 
-docs/CHANGES-AND-RATIONALE.md  what changed from the previous setup and why
-docs/decisions/DECISIONS.md    standing decisions that constrain future work, and why
-docs/changelogs/               one dated file per session that changed code, config, or docs
-.gitignore                     local settings, the worker ledger, and worktrees stay untracked
+CLAUDE.md                      project instructions for working on this repo itself
+docs/DESIGN-RATIONALE.md       why the package is built the way it is
+.gitignore                     project settings, ledger, worktrees, agent memory stay local
 INSTALL.md                     prompts to paste into Claude Code
 bootstrap.mjs                  cross-platform installer
 ```
@@ -66,7 +65,7 @@ de-duplication, and writes a timestamped backup first.
 
 **Aliases, not version numbers.** Agents pin `opus` / `sonnet` / `haiku`. Aliases track the
 current recommended version; version numbers rot. Model versions appear in exactly one file
-in this repo — `docs/CHANGES-AND-RATIONALE.md` — and never in config.
+in this repo — `docs/DESIGN-RATIONALE.md` — and never in config.
 
 **Contracts where they are guaranteed to land.** Subagents receive the `CLAUDE.md`
 hierarchy but not your conversation, auto memory, or output style. Anything a worker must
