@@ -1,0 +1,9 @@
+# Local, machine-specific settings overlay — never shared, never merged by bootstrap.mjs.
+.claude/settings.local.json
+
+# SubagentStop ledger — machine-local worker history, not shared project history.
+# See docs/CHANGES-AND-RATIONALE.md and docs/decisions/DECISIONS.md.
+.claude/worker-ledger.jsonl
+
+# Git worktrees created for isolated worker runs (isolation: worktree).
+.claude/worktrees/

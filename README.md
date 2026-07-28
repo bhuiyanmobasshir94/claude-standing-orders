@@ -47,6 +47,9 @@ examples/
   django-celery-ses-banking/   a filled-in project layer, as a worked reference
 
 docs/CHANGES-AND-RATIONALE.md  what changed from the previous setup and why
+docs/decisions/DECISIONS.md    standing decisions that constrain future work, and why
+docs/changelogs/               one dated file per session that changed code, config, or docs
+.gitignore                     local settings, the worker ledger, and worktrees stay untracked
 INSTALL.md                     prompts to paste into Claude Code
 bootstrap.mjs                  cross-platform installer
 ```
