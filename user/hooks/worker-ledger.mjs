@@ -33,12 +33,19 @@ function projectRoot(payload) {
   return process.cwd();
 }
 
-/** Pull the Result line out of a worker report that follows the contract. */
+/**
+ * Pull the Result line out of a worker report that follows the contract.
+ *
+ * Two vocabularies are accepted: `worker-contract` (DONE|PARTIAL|BLOCKED), which most
+ * workers report because they perform work, and `verifier`'s own (PASS|FAIL|BLOCKED),
+ * because it executes binary predicates rather than performing work. Both land in the
+ * same ledger, so both must parse.
+ */
 function extractResult(payload) {
   const candidates = [payload.last_message, payload.output, payload.result, payload.reason];
   for (const c of candidates) {
     if (typeof c !== "string") continue;
-    const m = c.match(/^##\s*Result\s*\r?\n+\s*(DONE|PARTIAL|BLOCKED)\b/im);
+    const m = c.match(/^##\s*Result\s*\r?\n+\s*(DONE|PARTIAL|BLOCKED|PASS|FAIL)\b/im);
     if (m) return m[1].toUpperCase();
   }
   return null;
@@ -63,7 +70,12 @@ try {
     process.exit(0);
   }
 
-  const agent = payload.agent_type || payload.agentType || "subagent";
+  // A genuine subagent completion always supplies `agent_type` (observed for `verifier`
+  // during this session). A SubagentStop payload with neither `agent_type` nor
+  // `agentType` is not a worker completion, so there is nothing worth a row for — skip it
+  // rather than logging the literal string "subagent", which carries zero information.
+  if (!payload.agent_type && !payload.agentType) process.exit(0);
+  const agent = payload.agent_type || payload.agentType;
 
   // Built-in read-only agents are noise in a ledger meant to track implementation work.
   if (["Explore", "Plan", "claude-code-guide", "statusline-setup"].includes(agent)) {

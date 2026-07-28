@@ -164,7 +164,7 @@ anything another machine must know has to be a committed file.
 | **Standing decisions** | `docs/decisions/DECISIONS.md` | Yes — committed | You and Claude, deliberately |
 | **Session history** | `docs/changelogs/YYYY-MM-DD-*.md` | Yes — committed | Required at session end |
 | **Agent knowledge** | `.claude/agent-memory/<agent>/` | Yes — commit this directory | `implementer` and `reviewer`, via `memory: project` |
-| **Worker ledger** | `.claude/worker-ledger.jsonl` | Optional — gitignore it or not | `SubagentStop` hook |
+| **Worker ledger** | `.claude/worker-ledger.jsonl` | No — gitignored | `SubagentStop` hook |
 | **Auto memory** | `~/.claude/projects/<project>/memory/` | **No** | Claude, automatically |
 
 The `session-brief` hook closes the loop: at every `SessionStart` it reads the decision log,
@@ -250,3 +250,87 @@ v2.1.198+. Run `claude update` on every machine before installing, then `claude 
 to confirm. On Amazon Bedrock or Vertex the `opus` and `sonnet` aliases resolve to older
 versions than on the Anthropic API — pin `ANTHROPIC_DEFAULT_OPUS_MODEL` and
 `ANTHROPIC_DEFAULT_SONNET_MODEL` in that machine's settings `env` if you deploy there.
+
+---
+
+## 9. This repository was not practicing its own policy
+
+A repository that tells other repositories how to run an orchestrator–worker workflow has
+to be internally consistent about it. It was not. Five contradictions existed between what
+this repo instructs and what it does, all found and fixed in the same session
+(2026-07-28) — see `docs/changelogs/2026-07-28-continuity-and-ledger-fixes.md` for the full
+verification trail.
+
+### 9.1 The worker ledger was committed, contradicting the onboarding skill
+
+`orchestration-onboard/SKILL.md` step 5 instructs: *"Add `.claude/settings.local.json` and
+`.claude/worker-ledger.jsonl` to `.gitignore`. Leave `.claude/agent-memory/` tracked."* Yet
+`.claude/worker-ledger.jsonl` was tracked in this repo (added in commit `92b735e`), and the
+repo shipped **no `.gitignore` at all**. `.claude/settings.local.json` was spared only by
+the developer's machine-local `~/.gitignore_global`, which does not exist on a fresh clone
+or a Linux server — exactly the portability failure this package exists to prevent.
+
+**Fix:** a root `.gitignore` now covers `.claude/settings.local.json`,
+`.claude/worker-ledger.jsonl`, and `.claude/worktrees/`; `.claude/worker-ledger.jsonl` was
+removed from the index with `git rm --cached` (the file itself is untouched on disk).
+`.claude/agent-memory/` is deliberately not listed, matching the skill.
+
+### 9.2 The rationale doc contradicted the skill it was documenting
+
+The §4 table above described the ledger's portability as "Optional — gitignore it or not."
+The skill says always ignore it. A reader who trusted the table over the skill would commit
+the ledger; a reader who trusted the skill over the table would think the doc was wrong.
+Either way, one of the two had to be authoritative.
+
+**Fix:** the table now reads "No — gitignored," matching the skill exactly.
+
+### 9.3 The ledger's result extractor didn't recognize the verifier's own vocabulary
+
+`user/hooks/worker-ledger.mjs`'s `extractResult` matched only
+`/^##\s*Result\s*\r?\n+\s*(DONE|PARTIAL|BLOCKED)\b/im` — the `worker-contract` vocabulary.
+But `verifier.md` declares its Result vocabulary as `PASS | FAIL | BLOCKED`, not
+`DONE | PARTIAL | BLOCKED`, because it executes binary predicates rather than performing
+work (§2, "`reviewer` and `verifier` are genuinely different roles"). This was not a
+theoretical gap: a real `verifier` subagent run in this session returned a report beginning
+`## Result` / `PASS`, and the ledger recorded `{"result": null, ...}` for it. Every verifier
+completion, ever, would log as `result: null`, which `session-brief.mjs` renders as
+`→ unknown` — silently discarding the one worker role whose entire job is to report a
+verdict.
+
+**Fix:** the regex now accepts `DONE|PARTIAL|BLOCKED|PASS|FAIL`, with a comment explaining
+why both vocabularies exist. Confirmed by piping a synthetic `verifier`-shaped payload
+through the hook and reading the appended row back — see the changelog's Verification
+section for the exact input and output.
+
+### 9.4 The ledger logged a row for stop events with no worker identity
+
+The same hook fell back to the literal string `"subagent"` when a `SubagentStop` payload
+carried neither `agent_type` nor `agentType`:
+`payload.agent_type || payload.agentType || "subagent"`. The §9.3 verifier run proves a
+genuine subagent completion *does* supply `agent_type`; a stop event that lacks it is
+therefore not a worker completion; it carries no agent identity, no result, and no note —
+a row of pure noise that pollutes `session-brief.mjs`'s "Recent worker activity" section
+with `→ unknown` lines.
+
+**Fix:** a payload with neither field now exits the hook with no row appended, inside the
+same fail-open `try` block that already governs every other path. This is a deliberate
+tradeoff: a genuine worker completion that somehow arrives without an identity field would
+now go unrecorded rather than logged under a placeholder. Nothing observed today omits the
+field; if that ever changes, ledger gaps are the first place to look.
+
+### 9.5 The repository did not follow its own session-continuity rule
+
+`session-continuity.md` requires a changelog entry for any session that changes code,
+config, or docs, and a decision log for choices that constrain future work. This repository
+had neither `docs/changelogs/` nor `docs/decisions/DECISIONS.md` — all three prior commits
+changed code and left no changelog entry, and `session-brief.mjs` consequently produced no
+brief when a session opened in this very repo, the one place it should never happen.
+
+**Fix:** `docs/decisions/DECISIONS.md` now records the decisions that were already
+load-bearing but undocumented — alias pinning, the no-effort-on-Haiku rule, one-writer-per-
+file, the no-diffs-in-reports rule, the preloaded-skill contract mechanism, committed-file
+continuity, the merge-only installer, generated (not committed) hook paths, fail-open
+observability, and this session's C1/C2 resolution. `docs/changelogs/` now holds this
+session's own entry, written in the shape `session-continuity.md` prescribes.
+`.claude/continuity.json` was deliberately **not** added, since its defaults already match
+what `session-brief.mjs` discovers by convention.
