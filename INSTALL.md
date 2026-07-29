@@ -119,6 +119,22 @@ rather than clobbered, so a machine-specific tweak survives until you resolve it
 `--force`. `status` compares file hashes and nothing more — run `node bootstrap.mjs doctor`
 to check that the install actually works on this machine.
 
+## Removing it from a machine
+
+```bash
+node bootstrap.mjs uninstall         # prints the plan, writes nothing
+node bootstrap.mjs uninstall --yes   # applies exactly that plan
+```
+
+It removes only what it installed. The manifest written at install time records the hash of
+every file this package wrote; a file is removed only if it still matches, and a settings
+value only if it still equals what the template installed. Everything else — your own
+agents, another plugin's hooks in the same array, your own permission rules, a hook script
+you edited — is kept and listed.
+
+`settings.json` is backed up first. Deleting `~/.claude` by hand does the same job far less
+carefully: it takes your plugins, projects, and history with it.
+
 ## Hard version enforcement (optional, requires root — not installed)
 
 This setup depends on Claude Code features with version floors, recorded in

@@ -111,11 +111,31 @@ node bootstrap.mjs install --dry-run
 node bootstrap.mjs install --force  # overwrite locally modified files
 node bootstrap.mjs status           # file drift against this repo (hashes only)
 node bootstrap.mjs doctor           # does the install work here? exits 1 on failure
+node bootstrap.mjs uninstall        # show what would be removed; writes nothing
+node bootstrap.mjs uninstall --yes  # actually remove it
 ```
 
 `install` is the default command, so an unrecognized flag aborts rather than quietly
 installing. A file you edited locally is skipped, never clobbered, and `doctor` reports it
 as kept rather than as a failure.
+
+## Removing it again
+
+`uninstall` removes what this package installed and nothing else. Ownership comes from the
+install manifest, not from a guess: a file is removed only if it is still byte-identical to
+what was written here, and a settings value only if it still exactly equals what the
+template installed. Anything you edited is yours — it stays, and is reported.
+
+That means your own agents survive, a plugin's hook sitting in the same `SessionStart` array
+survives, and your own `permissions.ask` rules survive while ours leave. Directories go only
+once they are empty. A timestamped backup of `settings.json` is written first.
+
+Without `--yes` it prints the plan and writes nothing, so you approve the exact text that
+will then be executed. With no manifest it refuses outright rather than deleting by name.
+
+One thing it cannot undo: if you had `model` or another template key set to your own value
+*before* the first install, the merge overwrote it and kept no record. Uninstall removes the
+key rather than restoring your value. The backups are the recovery path.
 
 ## Turning on the verification reminder
 

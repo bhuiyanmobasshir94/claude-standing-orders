@@ -690,3 +690,65 @@ zero files; `install` writes 15 and prints `doctor` as step one; `doctor` passes
 exits 0; a second `install` reports 0 written, 15 unchanged. Every hook, agent, skill, and
 rule count was checked against what the docs claim ships, and the template's five wired
 hooks were checked against the five files that exist.
+
+### 9.8 Uninstall: ownership has to be recorded, not inferred
+
+A package that installs into a directory it does not own needs a way out. Until now the only
+one was deleting files by hand, and the obvious shortcut — `rm -rf ~/.claude` — takes the
+user's plugins, projects, and history with it. That is a real gap for a package meant to be
+deployed across many machines, several of which may be someone else's.
+
+The design question is not how to delete files. It is **how the installer knows which files
+are its own**. Deleting by name — everything `./user` currently contains — is wrong in both
+directions: it misses a file installed by an earlier version of this package and since
+dropped from the repo, and it happily deletes a `reviewer.md` the user rewrote from scratch.
+
+The manifest already written at install time answers it. It records the hash of every file
+this package wrote, so the rule becomes: **remove a file only if it is still byte-identical
+to what was written here.** Identical means nobody has claimed it since. Different means
+someone edited it deliberately and it is now theirs — it is kept, and reported. Ownership is
+read from the manifest rather than from `./user`, so a file this package installed two
+versions ago is still removable and a file it never wrote is never touched.
+
+Settings needed the same rule in a different shape. The install merges; the uninstall
+subtracts, and a value is removed **only when it still exactly equals what the template
+installed** — the settings analogue of the hash comparison. Arrays are subtracted
+element-wise by the same JSON identity the merge used to de-duplicate them, so a plugin's
+`SessionStart` hook sitting in the same array as ours survives while ours leaves, and a
+user's own `permissions.ask` rule survives alongside the destructive-command baseline. A
+container emptied by that subtraction is dropped rather than left as `{}`; a `settings.json`
+that turns out to have held nothing but our keys is removed, since an empty settings file
+and no settings file are the same thing to Claude Code.
+
+The template is rendered by one function shared with `install`. Two copies of the
+placeholder substitution would eventually drift, and the first symptom would be an uninstall
+that no longer recognizes its own hook entries — it would silently leave them behind.
+
+Three deliberate refusals:
+
+- **`--yes` is required.** Every other command is safe to mistype now; this one deletes. It
+  prints its plan and writes nothing without the flag, and the plan is the identical text
+  either way, so what is approved is what runs. Consistency with `--dry-run` mattered less
+  than a mistyped `uninstall` costing a config directory.
+- **No manifest means refuse, not guess.** Without the record there is no basis for claiming
+  a file is ours, and the fallback — matching names against `./user` — is exactly the wrong
+  answer described above. It reports why and removes nothing.
+- **The manifest survives a partial uninstall.** While a locally modified file is still on
+  disk, the manifest is the only record that it came from this package, so it is rewritten
+  with just those entries rather than deleted.
+
+One thing it cannot do: restore a value the install overwrote. If `model` was set to
+something else before the first install, the merge replaced it and kept no record, so
+uninstall removes the key rather than restoring the original. The timestamped backup written
+immediately before the change is the recovery path, and this is stated in the README rather
+than left for someone to discover.
+
+Verified against a probe config directory seeded with a foreign `statusLine`, a foreign
+`SessionStart` hook, a user `permissions.ask` rule, and a hand-written agent, plus one of our
+own files edited after install. The plan run wrote nothing (19 files before and after). The
+applied run removed 14 files, kept the edited `reviewer.md`, kept every foreign key and
+array element, emptied and removed `hooks/`, `rules/`, and `skills/` while leaving `agents/`
+in place because the user's own agent was still in it, and left `settings.json` holding
+exactly the three foreign entries it started with. A second uninstall removed nothing and
+reported nothing to restart. A clean install → uninstall → install round trip returned
+`status` to "In sync with this repo".

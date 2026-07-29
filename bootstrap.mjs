@@ -11,6 +11,7 @@
  *   node bootstrap.mjs status      show what is installed and whether it matches this repo
  *   node bootstrap.mjs diff        list files that differ from this repo
  *   node bootstrap.mjs doctor      check that the install actually works; exit 1 on failure
+ *   node bootstrap.mjs uninstall   remove what this package installed, and only that
  *
  * `status` compares file hashes and nothing else. `doctor` answers the different and more
  * useful question of whether this machine can run the setup: Claude Code version against
@@ -20,6 +21,7 @@
  * Flags:
  *   --dry-run    print what would change, write nothing
  *   --force      overwrite locally modified files instead of skipping them
+ *   --yes        actually perform an uninstall (without it, uninstall only prints its plan)
  *   --home=PATH  target a config dir other than the default (for testing)
  *
  * Settings are merged, not replaced: existing keys are preserved, arrays are concatenated
@@ -35,8 +37,9 @@
 
 import {
   readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, copyFileSync, statSync,
+  unlinkSync, rmdirSync,
 } from "node:fs";
-import { join, resolve, relative, dirname } from "node:path";
+import { join, resolve, relative, dirname, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -63,7 +66,7 @@ const argv = process.argv.slice(2);
 // `install` is the default command, which makes an unrecognized argument dangerous: a
 // stranger typing `--help`, or fat-fingering `--dry-run`, would otherwise silently perform
 // a real install. Both are caught before anything is written.
-const KNOWN_FLAGS = ["--dry-run", "--force", "--help", "-h"];
+const KNOWN_FLAGS = ["--dry-run", "--force", "--yes", "--help", "-h"];
 const HELP = argv.some((a) => a === "--help" || a === "-h" || a === "help");
 const unknownFlags = argv.filter(
   (a) => a.startsWith("-") && !KNOWN_FLAGS.includes(a) && !a.startsWith("--home=")
@@ -72,6 +75,7 @@ const unknownFlags = argv.filter(
 const cmd = argv.find((a) => !a.startsWith("-")) || "install";
 const DRY = argv.includes("--dry-run");
 const FORCE = argv.includes("--force");
+const YES = argv.includes("--yes");
 const homeFlag = argv.find((a) => a.startsWith("--home="));
 
 function usage() {
@@ -84,11 +88,13 @@ Commands
   install     copy files into the Claude Code config dir and merge settings (default)
   status      show which installed files differ from this repo (file hashes only)
   doctor      check that the install actually works on this machine; exits 1 on failure
+  uninstall   remove what this package installed, and only that; needs --yes to write
   help        show this message
 
 Flags
   --dry-run     print what would change, write nothing
   --force       overwrite locally modified files instead of skipping them
+  --yes         perform the uninstall; without it, uninstall only prints its plan
   --home=PATH   target a config dir other than the default (for testing)
   -h, --help    show this message
 
@@ -241,9 +247,17 @@ function installFiles() {
   return { next, written, skipped, unchanged };
 }
 
-function installSettings() {
+/**
+ * The settings this package contributes to this machine, with the machine-specific
+ * placeholders resolved. Install merges this in; uninstall subtracts it back out. Both need
+ * the identical object, so it is rendered in one place — a second copy of the substitution
+ * would eventually drift and leave uninstall unable to recognize its own entries.
+ *
+ * Returns null when there is no template, `exit(1)` when the template is unparseable.
+ */
+function renderTemplate() {
   const tplPath = join(SRC, "settings.template.json");
-  if (!existsSync(tplPath)) return { changed: false };
+  if (!existsSync(tplPath)) return null;
 
   // The hook paths are genuinely machine-specific, so they are resolved at install time
   // rather than carried as a literal in the repo. JSON-encoding handles Windows separators.
@@ -254,13 +268,17 @@ function installSettings() {
     .split("__MIN_VERSION__")
     .join(FLOOR.minimumVersion || "0.0.0");
 
-  let incoming;
   try {
-    incoming = JSON.parse(tpl);
+    return JSON.parse(tpl);
   } catch (e) {
     console.error(c.red(`settings.template.json is not valid JSON after substitution: ${e.message}`));
     process.exit(1);
   }
+}
+
+function installSettings() {
+  const incoming = renderTemplate();
+  if (!incoming) return { changed: false };
 
   const target = join(DEST, "settings.json");
   let existing = {};
@@ -658,6 +676,221 @@ function doDoctor() {
   process.exit(failed === 0 ? 0 : 1);
 }
 
+/**
+ * Subtract this package's contribution from a merged settings object.
+ *
+ * A value is removed only when it still **exactly equals** what the template installed.
+ * That is the settings analogue of the manifest hash rule used for files: if it is still
+ * byte-identical to what we wrote, we wrote it and nothing has claimed it since; if it
+ * differs, someone changed it deliberately and it is now theirs to keep.
+ *
+ * Arrays are subtracted element-wise by JSON identity, the same identity the merge used to
+ * de-duplicate them. So a plugin's SessionStart hook sitting in the same array as ours
+ * survives, and only our own entries leave. A container emptied by that subtraction is
+ * dropped rather than left behind as `{}` or `[]`.
+ *
+ * Deliberately not handled: a key the template sets that the user's settings had *before*
+ * the first install with a different value. The merge overwrote it and kept no record, so
+ * the original is unrecoverable here. The timestamped backups are the recovery path, and
+ * uninstall writes a fresh one before touching anything.
+ */
+function subtractSettings(target, template, path = "", removed = [], kept = []) {
+  const out = { ...target };
+  for (const [k, tv] of Object.entries(template)) {
+    if (!(k in out)) continue;
+    const cur = out[k];
+    const where = path ? `${path}.${k}` : k;
+
+    if (isPlainObject(tv) && isPlainObject(cur)) {
+      const [sub] = subtractSettings(cur, tv, where, removed, kept);
+      if (Object.keys(sub).length === 0) delete out[k];
+      else out[k] = sub;
+    } else if (Array.isArray(tv) && Array.isArray(cur)) {
+      const ours = new Set(tv.map((x) => JSON.stringify(x)));
+      const rest = cur.filter((x) => !ours.has(JSON.stringify(x)));
+      const n = cur.length - rest.length;
+      if (n) removed.push(`${where}  (${n} of ${cur.length} entries)`);
+      if (rest.length === 0) delete out[k];
+      else out[k] = rest;
+    } else if (JSON.stringify(cur) === JSON.stringify(tv)) {
+      delete out[k];
+      removed.push(where);
+    } else {
+      kept.push(`${where}  (changed since install)`);
+    }
+  }
+  return [out, removed, kept];
+}
+
+/**
+ * Remove what this package installed, and nothing else.
+ *
+ * Ownership comes from the manifest, not from the current contents of ./user: a file this
+ * package installed in an earlier version and has since dropped from the repo is still ours
+ * to remove, and a file we never wrote is never ours to touch no matter where it sits.
+ *
+ * Because it deletes, this command is inert without `--yes`. A mistyped `uninstall` printing
+ * a plan costs nothing; one that runs costs a config directory. The plan is the same text
+ * either way, so what you approve is what happens.
+ */
+function doUninstall() {
+  const APPLY = YES && !DRY;
+  console.log(c.bold(`\nUninstall orchestrator–worker setup`));
+  console.log(c.dim(`  config dir: ${DEST}`));
+  console.log(c.dim(`  ${APPLY ? "removing files now" : "plan only — nothing will be written"}\n`));
+
+  // The manifest is the only record of what this package owns, so it is read strictly here
+  // rather than through `loadManifest`, which tolerates a corrupt file by returning an empty
+  // one. That tolerance is right for install — it just reinstalls — and wrong here: an empty
+  // manifest would report "removed 0 files" and then delete the manifest itself, destroying
+  // the only thing that could have made a later uninstall correct.
+  let manifest = null;
+  let manifestError = null;
+  if (existsSync(MANIFEST)) {
+    try {
+      const parsed = JSON.parse(readFileSync(MANIFEST, "utf8"));
+      if (parsed && isPlainObject(parsed.files)) manifest = parsed;
+      else manifestError = "it has no `files` object";
+    } catch (e) {
+      manifestError = e.message;
+    }
+  }
+  if (!manifest) {
+    console.log(
+      c.yellow(
+        manifestError
+          ? `  Manifest at ${MANIFEST} is unreadable: ${manifestError}`
+          : `  No manifest at ${MANIFEST}.`
+      )
+    );
+    console.log(
+      c.dim("  Without it there is no record of which files this package wrote, and guessing\n" +
+            "  from ./user could delete a file someone else owns. Nothing was removed.\n")
+    );
+    return;
+  }
+  const owned = Object.entries(manifest.files);
+
+  // 1. Files. Ours and untouched -> remove. Ours but edited -> keep and say so.
+  const remove = [];
+  const keptFiles = [];
+  const gone = [];
+  for (const [rel, knownHash] of owned) {
+    const to = join(DEST, ...rel.split("/"));
+    if (!existsSync(to)) {
+      gone.push(rel);
+      continue;
+    }
+    if (sha(readFileSync(to)) === knownHash) remove.push(rel);
+    else keptFiles.push(rel);
+  }
+
+  for (const rel of remove) {
+    console.log(c.green(`  remove  ${rel}`));
+    if (APPLY) unlinkSync(join(DEST, ...rel.split("/")));
+  }
+  for (const rel of keptFiles) {
+    console.log(c.yellow(`  keep    ${rel}  (modified locally — delete it yourself if you want it gone)`));
+  }
+  if (gone.length) console.log(c.dim(`  ${gone.length} file(s) already absent`));
+
+  // 2. Directories this package created, but only once they are empty. An empty `agents/`
+  // is ours to clean up; one still holding an agent someone else wrote is not.
+  if (APPLY) {
+    const dirs = [...new Set(remove.map((rel) => dirname(join(DEST, ...rel.split("/")))))]
+      .sort((a, b) => b.length - a.length); // deepest first, so nesting collapses in one pass
+    // `DEST + sep`, not `DEST`: a bare prefix test would also accept a sibling directory
+    // whose name merely starts with the config dir's, e.g. `~/.claude-backup`.
+    const inside = (p) => p.startsWith(DEST + sep) && p !== DEST;
+    for (const d of dirs) {
+      let cur = d;
+      while (inside(cur)) {
+        try {
+          if (readdirSync(cur).length) break;
+          rmdirSync(cur);
+          console.log(c.dim(`  rmdir   ${relative(DEST, cur)}`));
+        } catch {
+          break;
+        }
+        cur = dirname(cur);
+      }
+    }
+  }
+
+  // 3. Settings. Subtract only values still identical to what we installed.
+  const template = renderTemplate();
+  const settingsPath = join(DEST, "settings.json");
+  let settingsChanged = false;
+  if (template && existsSync(settingsPath)) {
+    let existing;
+    try {
+      existing = JSON.parse(readFileSync(settingsPath, "utf8"));
+    } catch (e) {
+      console.log(c.red(`\n  settings.json is not valid JSON (${e.message}) — left untouched.`));
+      existing = null;
+    }
+    if (existing) {
+      const [pruned, removedKeys, keptKeys] = subtractSettings(existing, template);
+      if (removedKeys.length === 0) {
+        console.log(c.dim("\n  settings.json: nothing of ours left to remove"));
+      } else {
+        settingsChanged = true;
+        const bak = APPLY ? backup(settingsPath) : null;
+        // Nothing left means the file held only our keys. An empty settings.json is
+        // semantically identical to no settings.json, and the backup written a line above
+        // is the recovery path, so leave a clean directory rather than a `{}`.
+        const emptied = Object.keys(pruned).length === 0;
+        if (APPLY) {
+          if (emptied) unlinkSync(settingsPath);
+          else writeFileSync(settingsPath, JSON.stringify(pruned, null, 2) + "\n", "utf8");
+        }
+        console.log(
+          `\n  ${c.green("settings.json")}` + (bak ? c.dim(`  (backup: ${relative(DEST, bak)})`) : "")
+        );
+        for (const k of removedKeys) console.log(c.green(`    remove  ${k}`));
+        if (emptied) console.log(c.dim("    file removed — nothing but our keys was in it"));
+      }
+      for (const k of keptKeys) console.log(c.yellow(`    keep    ${k}`));
+    }
+  }
+
+  // 4. The manifest goes only when it has nothing left to describe. While a locally
+  // modified file survives, the manifest is the only record that it came from here.
+  if (APPLY) {
+    if (keptFiles.length === 0) {
+      unlinkSync(MANIFEST);
+      console.log(c.dim(`\n  remove  ${relative(DEST, MANIFEST)}`));
+    } else {
+      const rest = {};
+      for (const rel of keptFiles) rest[rel] = manifest.files[rel];
+      writeFileSync(
+        MANIFEST,
+        JSON.stringify({ installedAt: manifest.installedAt || null, files: rest }, null, 2) + "\n",
+        "utf8"
+      );
+      console.log(c.dim(`\n  manifest kept — it still describes ${keptFiles.length} local file(s)`));
+    }
+  }
+
+  if (!APPLY) {
+    console.log(
+      c.bold(`\nPlan only. ${remove.length} file(s) would be removed.`) +
+        "\nRe-run with " + c.bold("--yes") + " to apply.\n"
+    );
+    return;
+  }
+  console.log(
+    c.bold(`\nRemoved ${remove.length} file(s).`) +
+      (keptFiles.length ? c.yellow(` Kept ${keptFiles.length} locally modified.`) : "")
+  );
+  // Only worth saying when something actually changed — a second uninstall that found
+  // nothing left should not send anyone off to restart their editor for no reason.
+  if (remove.length || settingsChanged) {
+    console.log("Restart Claude Code so the change takes effect.");
+  }
+  console.log("");
+}
+
 if (HELP) {
   usage();
   process.exit(0);
@@ -680,7 +913,10 @@ switch (cmd) {
   case "doctor":
     doDoctor();
     break;
+  case "uninstall":
+    doUninstall();
+    break;
   default:
-    console.error(`Unknown command "${cmd}". Use: install | status | diff | doctor`);
+    console.error(`Unknown command "${cmd}". Use: install | status | diff | doctor | uninstall`);
     process.exit(1);
 }
