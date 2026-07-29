@@ -59,10 +59,43 @@ const FLOOR = (() => {
 })();
 
 const argv = process.argv.slice(2);
-const cmd = argv.find((a) => !a.startsWith("--")) || "install";
+
+// `install` is the default command, which makes an unrecognized argument dangerous: a
+// stranger typing `--help`, or fat-fingering `--dry-run`, would otherwise silently perform
+// a real install. Both are caught before anything is written.
+const KNOWN_FLAGS = ["--dry-run", "--force", "--help", "-h"];
+const HELP = argv.some((a) => a === "--help" || a === "-h" || a === "help");
+const unknownFlags = argv.filter(
+  (a) => a.startsWith("-") && !KNOWN_FLAGS.includes(a) && !a.startsWith("--home=")
+);
+
+const cmd = argv.find((a) => !a.startsWith("-")) || "install";
 const DRY = argv.includes("--dry-run");
 const FORCE = argv.includes("--force");
 const homeFlag = argv.find((a) => a.startsWith("--home="));
+
+function usage() {
+  console.log(`
+Orchestrator-worker setup installer
+
+  node bootstrap.mjs <command> [flags]
+
+Commands
+  install     copy files into the Claude Code config dir and merge settings (default)
+  status      show which installed files differ from this repo (file hashes only)
+  doctor      check that the install actually works on this machine; exits 1 on failure
+  help        show this message
+
+Flags
+  --dry-run     print what would change, write nothing
+  --force       overwrite locally modified files instead of skipping them
+  --home=PATH   target a config dir other than the default (for testing)
+  -h, --help    show this message
+
+Settings are merged, never replaced, and a timestamped backup is written first.
+After installing, run \`node bootstrap.mjs doctor\`, then restart Claude Code.
+`);
+}
 
 /** Claude Code honors CLAUDE_CONFIG_DIR; otherwise the config dir is <home>/.claude. */
 function configDir() {
@@ -299,8 +332,10 @@ function doInstall() {
     `\n${c.bold("Done.")} ${written} written, ${unchanged} unchanged` +
       (skipped ? `, ${c.yellow(`${skipped} skipped`)}` : "") + "\n"
   );
-  console.log("Next: restart Claude Code, then run " + c.bold("/context") + " to confirm");
-  console.log("CLAUDE.md and the rules loaded, and " + c.bold("/status") + " to confirm the settings source.\n");
+  console.log("Next:");
+  console.log("  1. " + c.bold("node bootstrap.mjs doctor") + "   confirm this machine can actually run it");
+  console.log("  2. restart Claude Code           settings and CLAUDE.md load at session start");
+  console.log("  3. " + c.bold("/context") + " and " + c.bold("/status") + "        confirm the policy loaded and the model is right\n");
 }
 
 function doStatus() {
@@ -621,6 +656,17 @@ function doDoctor() {
       : c.red(`\n  ${failed} of ${checks.length} checks failed.\n`)
   );
   process.exit(failed === 0 ? 0 : 1);
+}
+
+if (HELP) {
+  usage();
+  process.exit(0);
+}
+if (unknownFlags.length) {
+  console.error(c.red(`Unknown flag: ${unknownFlags.join(", ")}`));
+  console.error(c.dim("Nothing was written. Recognized flags are listed below.\n"));
+  usage();
+  process.exit(1);
 }
 
 switch (cmd) {

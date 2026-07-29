@@ -2,7 +2,7 @@
 
 One repository that produces an identical orchestrator–worker workflow on every machine —
 Mac, Windows, Linux, or a server. Verified against the Claude Code documentation on
-27 July 2026.
+29 July 2026.
 
 ## Quick start
 
@@ -10,19 +10,29 @@ Mac, Windows, Linux, or a server. Verified against the Claude Code documentation
 git clone <your-repo-url> claude-orchestrator
 cd claude-orchestrator
 node bootstrap.mjs install
+node bootstrap.mjs doctor      # confirm this machine can actually run it
 ```
 
 Then restart Claude Code and run `/context` to confirm the global `CLAUDE.md` and rules
 loaded. `INSTALL.md` has prompts you can paste into Claude Code to do this and verify it for you.
 
-Requires Claude Code **v2.1.219+** (Opus 5) and Node 18+.
+`install` copies files and merges settings. `doctor` is the one that tells you whether the
+result works here — version floor, hook paths, settings validity, agent definitions — and
+exits non-zero so you can put it in a script. `status` compares file hashes and nothing more.
+
+Requires Node 18+ and a Claude Code version at or above the floor in
+`user/version-floor.json`. Below that floor several features this setup depends on fail
+**silently**: worker nesting stops being capped, the concurrency cap is ignored, and `opus`
+resolves to a model generation behind. The session brief warns and `doctor` checks.
 
 ## Layout
 
 ```
 user/                          → installs into ~/.claude/
   CLAUDE.md                    the orchestrator–worker policy, loaded every session
-  settings.template.json       merged into settings.json; __CLAUDE_HOME__ resolved per machine
+  settings.template.json       merged into settings.json; __CLAUDE_HOME__ and
+                               __MIN_VERSION__ resolved per machine
+  version-floor.json           the Claude Code version floor — the only place it is stated
   agents/
     implementer.md             Sonnet · xhigh · project memory — substantive coding
     fast-implementer.md        Haiku — bounded mechanical changes
@@ -34,9 +44,12 @@ user/                          → installs into ~/.claude/
   rules/
     session-continuity.md      changelog and decision-log format (always loaded)
     documentation-accuracy.md  verify-against-source rules (loads on docs and markdown)
-  hooks/
-    session-brief.mjs          SessionStart — injects decisions + recent changelogs
+  hooks/                       five hooks; all fail open, all exit 0 on every path
+    session-brief.mjs          SessionStart — version warning, decisions, changelogs, routing
+    packet-check.mjs           SubagentStart — warns a worker when its Task Packet is thin
     worker-ledger.mjs          SubagentStop — one line per worker completion
+    compact-state.mjs          PreCompact — snapshots workers and files before compaction
+    verify-reminder.mjs        Stop — reminds when code changed but nothing was verified
 
 project-template/              → stack-agnostic starting point for any repository
   CLAUDE.md                    fill-in template; judgment context, not a file tree
@@ -64,8 +77,16 @@ marketplaces, a statusline. The installer deep-merges, concatenates hook arrays 
 de-duplication, and writes a timestamped backup first.
 
 **Aliases, not version numbers.** Agents pin `opus` / `sonnet` / `haiku`. Aliases track the
-current recommended version; version numbers rot. Model versions appear in exactly one file
-in this repo — `docs/DESIGN-RATIONALE.md` — and never in config.
+current recommended version; version numbers rot. The one number that is a real runtime
+dependency rather than a model preference — the Claude Code version floor — lives in
+`user/version-floor.json` and nowhere else. The installer substitutes it into settings, the
+session brief warns against it, and `doctor` checks it. Nothing restates it in prose.
+
+**Nothing fails silently if it can be made to fail loudly.** This package exists because
+the expensive failures in an agent setup are the quiet ones: a config key that is ignored, a
+hook that logs nothing, a check that passes because it had no data. `doctor` fails when it
+cannot determine an answer rather than passing, and the session brief reports when the
+worker ledger has recorded nothing at all.
 
 **Contracts where they are guaranteed to land.** Subagents receive the `CLAUDE.md`
 hierarchy but not your conversation, auto memory, or output style. Anything a worker must
@@ -84,8 +105,28 @@ repository has to adopt a directory name to benefit.
 ## Commands
 
 ```bash
+node bootstrap.mjs help             # usage; writes nothing
 node bootstrap.mjs install          # install or update
 node bootstrap.mjs install --dry-run
 node bootstrap.mjs install --force  # overwrite locally modified files
-node bootstrap.mjs status           # show drift against this repo
+node bootstrap.mjs status           # file drift against this repo (hashes only)
+node bootstrap.mjs doctor           # does the install work here? exits 1 on failure
 ```
+
+`install` is the default command, so an unrecognized flag aborts rather than quietly
+installing. A file you edited locally is skipped, never clobbered, and `doctor` reports it
+as kept rather than as a failure.
+
+## Turning on the verification reminder
+
+The `Stop` hook is inert until a project opts in. Add its real commands to that project's
+`.claude/continuity.json`:
+
+```json
+{ "verifyCommands": ["make test", "make lint"] }
+```
+
+Without the key the hook does nothing, in every project. That is deliberate: a reminder
+that guesses which command counts as verification would fire on projects that verified
+correctly, and a nag you learn to ignore is worse than no nag. `/orchestration-onboard`
+fills this in for you.

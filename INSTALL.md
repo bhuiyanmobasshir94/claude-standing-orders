@@ -73,6 +73,31 @@ creating a competing one.
 
 ---
 
+## What the install adds to your settings.json
+
+Five hooks. Every one is an observability surface: it exits 0 on every path, including
+malformed input, and none of them can block a session. If any of them breaks, the session
+still runs.
+
+| Hook | Event | What it does | Silent when |
+| --- | --- | --- | --- |
+| `session-brief.mjs` | SessionStart | Warns if Claude Code is below the version floor; injects standing decisions, recent changelogs, and a worker routing signal | the repo has no continuity files and the version is fine |
+| `packet-check.mjs` | SubagentStart | Tells a worker which Task Packet fields its dispatch omitted | the packet is complete, or the worker is `verifier` |
+| `worker-ledger.mjs` | SubagentStop | Appends one metadata line per worker completion | the subagent is a built-in read-only one |
+| `compact-state.mjs` | PreCompact | Snapshots dispatched workers and files written, so compaction does not erase the integration picture | no workers ran and nothing was written |
+| `verify-reminder.mjs` | Stop | Reminds you when code changed but no declared verification command ran | **always, unless a project sets `verifyCommands`** |
+
+The last one is opt-in per project. Add the real commands to that project's
+`.claude/continuity.json` and nothing else:
+
+```json
+{ "verifyCommands": ["make test", "make lint"] }
+```
+
+Without that key the hook does nothing at all. It never guesses which command counts as
+verification, because a reminder that fires on projects that *did* verify is one you switch
+off — and switching it off removes the reminder for the projects that need it.
+
 ## Daily use
 
 Nothing to invoke — the policy loads at every session start and Claude routes automatically.

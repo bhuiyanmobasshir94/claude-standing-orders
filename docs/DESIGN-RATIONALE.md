@@ -3,7 +3,7 @@
 This document explains why the package is built the way it is: the bugs the current design
 fixes, the choices layered on top of those fixes, and the constraints that shape both. Every
 claim below was checked against the current Claude Code documentation
-(`code.claude.com/docs`) on 27 July 2026, not against recalled behavior. Version floors are
+(`code.claude.com/docs`) on 29 July 2026, not against recalled behavior. Version floors are
 noted where a feature is recent enough to matter.
 
 ---
@@ -650,3 +650,43 @@ which is undefined — with `-e` there is no script path in `argv`, so positiona
 reported a clean exit 0. The tell was the one case that should have produced a reminder
 returning zero bytes. An all-pass result whose passes all have the same cause deserves the
 same suspicion as an all-fail one.
+
+### 9.7 Defects that only exist because this is a package
+
+The previous rounds hardened what the setup *does*. This one looked at what a stranger
+meets when they run it on a machine that has never seen it. Three defects were visible only
+from that angle.
+
+**`node bootstrap.mjs --help` installed 17 files.** The command dispatcher took the first
+non-`--` argument and defaulted to `install`, so any invocation with no bare command word
+installed — including the single most common thing a person types when they want to know
+what a program does. The same hole made `--dry-run` dangerous to mistype: `--dry` performed
+a real install, silently, because an unrecognized flag was simply ignored.
+
+Both are now caught before anything is written: `help` / `--help` / `-h` print usage and
+exit 0, and an unrecognized flag prints what it was, states that nothing was written, shows
+usage, and exits 1. For a package whose whole promise is that it behaves the same on every
+machine, "the default command mutates your config" is a poor default.
+
+**The install output never mentioned `doctor`.** §8.3 added the command that answers whether
+an install actually works, and then the install itself told the user to restart Claude Code
+and run `/context`. A diagnostic nobody is pointed at is a diagnostic nobody runs. The
+next-steps block now leads with it.
+
+**The README described an older system.** It listed two hooks when five ship, never
+mentioned `doctor`, the version floor, or `verifyCommands`, and asserted that model versions
+appear "in exactly one file in this repo — `docs/DESIGN-RATIONALE.md`" — which §7 had
+already made false by moving the floor into `user/version-floor.json` and deliberately
+refusing to restate it in prose. The front door of a distributable package contradicting its
+own design document is the documentation-accuracy defect this repo's rules describe: worse
+than no doc, because it is trusted.
+
+`INSTALL.md` gained a table of the five hooks — event, purpose, and when each stays silent —
+because a fresh install adds five entries to a stranger's `settings.json` and they deserve
+to know what appeared and why none of it can break their session.
+
+Verified by simulating a fresh workstation end to end: `--help` on an empty target creates
+zero files; `install` writes 15 and prints `doctor` as step one; `doctor` passes 8 of 8 and
+exits 0; a second `install` reports 0 written, 15 unchanged. Every hook, agent, skill, and
+rule count was checked against what the docs claim ships, and the template's five wired
+hooks were checked against the five files that exist.
