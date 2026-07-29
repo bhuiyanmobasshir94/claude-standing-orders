@@ -19,42 +19,88 @@ import { execFileSync } from "node:child_process";
 const ROOT = process.cwd();
 const VERBOSE = process.argv.includes("--verbose");
 
+// Authority for: every frontmatter key Claude Code accepts on an agent definition
+// (user/agents/*.md). Source: Claude Code's own agent-definition contract, not a file in
+// this repo — section 4 (Agents) fails any key outside this set as unknown.
 const AGENT_FIELDS = new Set([
   "name", "description", "tools", "disallowedTools", "model", "permissionMode", "maxTurns",
   "skills", "mcpServers", "hooks", "memory", "background", "effort", "isolation", "color",
   "initialPrompt",
 ]);
+// Authority for: every frontmatter key Claude Code accepts on a SKILL.md. Source: Claude
+// Code's own skill-definition contract — section 5 (Skills) fails any key outside this set.
 const SKILL_FIELDS = new Set([
   "name", "description", "disable-model-invocation", "user-invocable", "allowed-tools",
   "model", "effort", "context", "agent", "hooks", "paths", "argument-hint", "arguments",
 ]);
+// Authority for: the one frontmatter key a path-scoped rule file may declare. Source:
+// Claude Code's rule-loading contract (paths: activates a rule only when a matching file
+// is touched) — section 6 (Rules) fails any other key as unknown.
 const RULE_FIELDS = new Set(["paths"]);
 
+// Authority for: recognized model aliases across agent/skill frontmatter. Source: the
+// alias table this package pins against, also restated in CLAUDE.md's Roles table.
 const MODEL_ALIASES = new Set(["sonnet", "opus", "haiku", "fable", "inherit", "default", "best"]);
+// Authority for: recognized values of an `effort:` field. Source: Claude Code's effort
+// levels — section 4 (Agents) rejects any value outside this set.
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 /** Models that support effort levels. Haiku is deliberately absent. */
 const EFFORT_CAPABLE = new Set(["sonnet", "opus", "fable", "best"]);
 
+// Authority for: the line budget a CLAUDE.md must stay under. Source: this package's own
+// size-discipline convention (see section 7, Size) — chosen so the file stays skimmable.
 const CLAUDE_MD_MAX_LINES = 170;
 const LEAK_TERMS = /\b(django|celery|IBBL|serializer|SESCredential|drf)\b/i;
 
 let failures = 0;
 let checks = 0;
 
+/**
+ * Records a satisfied invariant. Only printed under `--verbose`, since a passing repo
+ * should be quiet by default and the failures are what need attention.
+ *
+ * @param {string} msg - Human-readable description of the invariant that held.
+ * @returns {void}
+ */
 function pass(msg) {
   checks++;
   if (VERBOSE) console.log(`  ok    ${msg}`);
 }
+/**
+ * Records and prints a violated invariant. Always printed, regardless of `--verbose`,
+ * and counted toward the final failure tally that decides the process exit code.
+ *
+ * @param {string} msg - Human-readable description of the invariant that failed.
+ * @param {string} [detail] - Optional extra context (e.g. an error message or offending
+ *   line) printed indented beneath `msg`.
+ * @returns {void}
+ */
 function fail(msg, detail) {
   checks++;
   failures++;
   console.log(`  FAIL  ${msg}${detail ? `\n          ${detail}` : ""}`);
 }
+/**
+ * Prints a section banner to separate one group of related invariants from the next in
+ * the console output.
+ *
+ * @param {string} name - The section's display name (e.g. "Layout", "Agents").
+ * @returns {void}
+ */
 function section(name) {
   console.log(`\n${name}`);
 }
 
-/** Minimal YAML frontmatter reader for the subset used here: scalars, lists, block scalars. */
+/**
+ * Minimal YAML frontmatter reader for the subset used here: scalars, lists, block scalars.
+ *
+ * @param {string} text - The full file contents, frontmatter block plus body.
+ * @returns {object|null} The parsed key/value map, or `null` specifically when the file has
+ *   no `---`-delimited frontmatter block at all. That distinction is load-bearing: section 6
+ *   (Rules) treats `null` as "this rule is always-loaded, by design" and passes, whereas an
+ *   empty object `{}` would mean "frontmatter exists but declares nothing" — a different,
+ *   and differently-checked, condition.
+ */
 function frontmatter(text) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
   if (!m) return null;
@@ -91,6 +137,14 @@ function frontmatter(text) {
 }
 const unquote = (s) => s.replace(/^['"]|['"]$/g, "");
 
+/**
+ * Recursively collects every file path under `dir`, skipping `.git` and `node_modules`.
+ *
+ * @param {string} dir - Directory to walk, as an absolute or CWD-relative path.
+ * @param {string[]} [acc] - Accumulator carried through the recursion; callers should
+ *   normally omit it and rely on the default.
+ * @returns {string[]} Every file path found, in traversal order (directories not included).
+ */
 function walk(dir, acc = []) {
   if (!existsSync(dir)) return acc;
   for (const name of readdirSync(dir)) {
@@ -104,6 +158,9 @@ function walk(dir, acc = []) {
 const rel = (p) => relative(ROOT, p).split("\\").join("/");
 
 // ── 1. Layout ────────────────────────────────────────────────────────────────
+// Defends the package's expected file tree: every directory a downstream install depends on
+// (agents, skills, rules, hooks, templates) is present, and nothing from a prior major
+// version (project/, INSTALL_PROMPT.md) still lingers to be installed by mistake.
 section("Layout");
 for (const p of ["bootstrap.mjs", "user", "user/agents", "user/skills", "user/rules",
                  "user/hooks", "user/CLAUDE.md", "user/settings.template.json",
@@ -117,6 +174,9 @@ for (const p of ["project", "INSTALL_PROMPT.md"]) {
 }
 
 // ── 2. Scripts parse ─────────────────────────────────────────────────────────
+// Defends against a syntax error shipping silently: every .mjs/.js file in the repo must
+// parse under `node --check`, so a broken script fails here rather than at install time or,
+// worse, inside a hook that fails open and never surfaces the error to anyone.
 section("Scripts");
 const scripts = walk(ROOT).filter((f) => f.endsWith(".mjs") || f.endsWith(".js"));
 if (!scripts.length) fail("no .mjs scripts found");
@@ -130,6 +190,10 @@ for (const f of scripts) {
 }
 
 // ── 3. JSON parses ───────────────────────────────────────────────────────────
+// Defends against malformed JSON reaching `bootstrap.mjs`, which merges these files into a
+// user's real ~/.claude/settings.json; a parse failure there corrupts an installed config
+// rather than failing a check here. Also confirms settings.template.json still carries the
+// __CLAUDE_HOME__ placeholder bootstrap.mjs substitutes per machine.
 section("JSON");
 for (const f of walk(ROOT).filter((f) => f.endsWith(".json"))) {
   try {
@@ -147,6 +211,10 @@ if (existsSync(tpl)) {
 }
 
 // ── 4. Agents ────────────────────────────────────────────────────────────────
+// Defends the worker contract at its source: each agent's frontmatter declares only
+// recognized fields, a valid model and effort combination (no effort on an effort-incapable
+// model), no tool that lets a worker spawn a worker, and skills it preloads resolve to real
+// files — the properties CLAUDE.md's Roles table and parallelism rules assume hold.
 section("Agents");
 const agentDir = join(ROOT, "user/agents");
 const agents = existsSync(agentDir)
@@ -197,6 +265,10 @@ for (const f of agents) {
 }
 
 // ── 5. Skills ────────────────────────────────────────────────────────────────
+// Defends that every installed skill has valid, complete frontmatter, and that no skill an
+// agent preloads sets `disable-model-invocation: true` — a preloaded skill is always in
+// context, so a flag meant to keep a skill invocation-only on that skill is a contradiction
+// that would silently misrepresent how the skill actually loads.
 section("Skills");
 for (const d of installedSkills) {
   const f = join(ROOT, "user/skills", d, "SKILL.md");
@@ -222,6 +294,9 @@ for (const f of agents) {
 }
 
 // ── 6. Rules ─────────────────────────────────────────────────────────────────
+// Defends that every rule file's frontmatter is either absent (always-loaded, by design) or
+// declares only `paths:` (path-scoped). An unrecognized key here would silently fail to
+// scope the rule the way its author intended, so it would load everywhere or nowhere.
 section("Rules");
 const ruleFiles = [
   ...walk(join(ROOT, "user/rules")),
@@ -237,6 +312,9 @@ for (const f of ruleFiles) {
 }
 
 // ── 7. Size discipline ───────────────────────────────────────────────────────
+// Defends the promise that CLAUDE.md stays skimmable: it is loaded into every session's
+// context on every turn, so unbounded growth is a recurring context-budget cost, not a
+// one-time readability complaint.
 section("Size");
 for (const p of ["user/CLAUDE.md", "project-template/CLAUDE.md"]) {
   const f = join(ROOT, p);
@@ -247,6 +325,10 @@ for (const p of ["user/CLAUDE.md", "project-template/CLAUDE.md"]) {
 }
 
 // ── 8. Stack-agnosticism ─────────────────────────────────────────────────────
+// Defends that the shipped package (user/ and project-template/) names no specific
+// framework or private project. This package installs into any repo regardless of stack;
+// a leaked term (e.g. a framework name or an internal credential-like identifier) would
+// both break that generality and risk exposing something that should not ship.
 section("Stack-agnosticism");
 let leaks = 0;
 for (const f of [...walk(join(ROOT, "user")), ...walk(join(ROOT, "project-template"))]) {
@@ -357,7 +439,16 @@ writeFileSync(
   ].join("\n") + "\n"
 );
 
-/** Run a hook with the given stdin. Returns { code, out }. */
+/**
+ * Run a hook with the given stdin. Returns { code, out }.
+ *
+ * @param {string} file - Hook filename relative to `HOOK_DIR` (e.g. "packet-check.mjs").
+ * @param {string} stdin - Raw payload piped to the hook's stdin, typically a JSON string.
+ * @param {object} [env] - Extra environment variables merged over `process.env` for this
+ *   invocation.
+ * @returns {{code: number, out: string}} The process exit code and its captured stdout;
+ *   a thrown (non-zero) exit is caught and its stdout still returned rather than swallowed.
+ */
 function runHook(file, stdin, env = {}) {
   try {
     const out = execFileSync(process.execPath, [join(HOOK_DIR, file)], {

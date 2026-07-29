@@ -47,7 +47,12 @@ const CODE_RE =
 const CODE_BASENAMES = /^(dockerfile|makefile|justfile|rakefile|procfile|jenkinsfile)$/i;
 const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
 
-/** A path counts when either its extension or its bare filename says it is code. */
+/**
+ * A path counts when either its extension or its bare filename says it is code.
+ *
+ * @param {string} p - File path to check.
+ * @returns {boolean} True when `p` matches CODE_RE or its basename matches CODE_BASENAMES.
+ */
 function isCodePath(p) {
   if (CODE_RE.test(p)) return true;
   const base = p.split(/[\\/]/).pop() || "";
@@ -66,6 +71,11 @@ function isCodePath(p) {
  * This trades one error for the other on purpose. It can miss an unusual invocation and remind
  * a session that did verify — mild noise, and the reminder's own text tells the reader to say
  * so and finish. The failure it removes is worse and invisible: silence that reads as proof.
+ *
+ * @param {string} cmd - The full command string from a `Bash` tool call.
+ * @param {string[]} commands - The project's declared `verifyCommands`.
+ * @returns {boolean} True when some shell segment of `cmd`, after stripping leading
+ *   environment assignments, starts with one of `commands`.
  */
 function ranVerification(cmd, commands) {
   const segments = String(cmd).split(/\n|;|&&|\|\||\|/);
@@ -76,6 +86,12 @@ function ranVerification(cmd, commands) {
   return false;
 }
 
+/**
+ * Read the entire hook payload from stdin synchronously.
+ *
+ * @returns {string} The raw stdin contents, or `""` if stdin cannot be read — this hook is
+ *   fail-open, so a read failure must look like "no payload" rather than throw.
+ */
 function readStdinSync() {
   try {
     return readFileSync(0, "utf8");
@@ -84,7 +100,12 @@ function readStdinSync() {
   }
 }
 
-/** Must resolve the same way as the other hooks, or the marker lands somewhere else. */
+/**
+ * Must resolve the same way as the other hooks, or the marker lands somewhere else.
+ *
+ * @param {object} payload - The parsed hook payload; only `payload.cwd` is read.
+ * @returns {string} Absolute path to the project root.
+ */
 function projectRoot(payload) {
   const fromEnv = process.env.CLAUDE_PROJECT_DIR;
   if (fromEnv && existsSync(fromEnv)) return resolve(fromEnv);
@@ -92,6 +113,14 @@ function projectRoot(payload) {
   return process.cwd();
 }
 
+/**
+ * Read this project's declared verification commands.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @returns {string[]} The `verifyCommands` list from `.claude/continuity.json`, filtered to
+ *   non-empty strings — or `[]` when the file is missing, unreadable, or declares none. An
+ *   empty result is what keeps this hook inert for a project that has not opted in.
+ */
 function verifyCommands(root) {
   try {
     const cfg = JSON.parse(readFileSync(join(root, ".claude", "continuity.json"), "utf8"));
@@ -102,7 +131,14 @@ function verifyCommands(root) {
   }
 }
 
-/** Read only the bytes appended since the previous turn. */
+/**
+ * Read only the bytes appended since the previous turn.
+ *
+ * @param {string} path - Absolute path to the transcript JSONL file.
+ * @param {number} offset - Byte offset to read from, as saved from the previous scan.
+ * @returns {{text: string, size: number}} The newly appended text (`""` when the file has
+ *   not grown past `offset`), and the file's current size to save as the next offset.
+ */
 function readFrom(path, offset) {
   const size = statSync(path).size;
   if (size <= offset) return { text: "", size };
@@ -117,11 +153,26 @@ function readFrom(path, offset) {
   }
 }
 
+/**
+ * @param {object} entry - One parsed JSONL transcript line.
+ * @returns {object[]} The message's content blocks, or `[]` when the shape does not match.
+ */
 function blocks(entry) {
   const content = entry && entry.message && entry.message.content;
   return Array.isArray(content) ? content : [];
 }
 
+/**
+ * Scan newly appended transcript text for a code edit or a verification run, mutating
+ * `state` in place so the caller can persist it as the marker for the next turn.
+ *
+ * @param {string} text - Newly appended transcript text, one JSON object per line.
+ * @param {string[]} commands - The project's declared `verifyCommands`.
+ * @param {{edited: boolean, verified: boolean}} state - Mutable scan state; `edited` is set
+ *   when a `Write`/`Edit`/`NotebookEdit` touches a code path, `verified` is set when a `Bash`
+ *   call runs a declared command or an `Agent` call dispatches `verifier`.
+ * @returns {{edited: boolean, verified: boolean}} The same `state` object, mutated.
+ */
 function scan(text, commands, state) {
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;

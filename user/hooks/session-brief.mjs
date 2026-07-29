@@ -66,6 +66,12 @@ const MAX_TOTAL_CHARS = 8000;
 /** How many ledger rows the routing rollup considers. Older runs are not evidence today. */
 const LEDGER_WINDOW = 40;
 
+/**
+ * Read the entire hook payload from stdin synchronously.
+ *
+ * @returns {string} The raw stdin contents, or `""` if stdin cannot be read — this hook is
+ *   fail-open, so a read failure must look like "no payload" rather than throw.
+ */
 function readStdinSync() {
   try {
     return readFileSync(0, "utf8");
@@ -74,6 +80,12 @@ function readStdinSync() {
   }
 }
 
+/**
+ * Resolve the project root, preferring the environment over the payload over the cwd.
+ *
+ * @param {object} payload - The parsed hook payload; only `payload.cwd` is read.
+ * @returns {string} Absolute path to the project root.
+ */
 function projectRoot(payload) {
   const fromEnv = process.env.CLAUDE_PROJECT_DIR;
   if (fromEnv && existsSync(fromEnv)) return resolve(fromEnv);
@@ -81,6 +93,13 @@ function projectRoot(payload) {
   return process.cwd();
 }
 
+/**
+ * Load this project's `.claude/continuity.json`, if present.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @returns {object} The parsed config object, or `{}` when the file is missing, unreadable,
+ *   or does not parse to an object.
+ */
 function config(root) {
   const f = join(root, ".claude", "continuity.json");
   if (!existsSync(f)) return {};
@@ -92,6 +111,10 @@ function config(root) {
   }
 }
 
+/**
+ * @param {string} p - Path to check.
+ * @returns {boolean} True when `p` exists and is a directory.
+ */
 function isDir(p) {
   try {
     return statSync(p).isDirectory();
@@ -100,6 +123,14 @@ function isDir(p) {
   }
 }
 
+/**
+ * Truncate text to its first `maxLines` lines, noting how much was cut.
+ *
+ * @param {string} text - The text to truncate.
+ * @param {number} maxLines - Maximum number of lines to keep.
+ * @returns {string} The truncated text, with a trailing "… (N more lines)" marker appended
+ *   when lines were dropped.
+ */
 function head(text, maxLines) {
   const lines = text.split(/\r?\n/);
   const kept = lines.slice(0, maxLines);
@@ -107,7 +138,13 @@ function head(text, maxLines) {
   return kept.join("\n");
 }
 
-/** Markdown files in a directory, newest first — by leading date if present, else mtime. */
+/**
+ * Markdown files in a directory, newest first — by leading date if present, else mtime.
+ *
+ * @param {string} dir - Directory to scan for markdown files.
+ * @param {number} limit - Maximum number of filenames to return.
+ * @returns {string[]} Filenames (not full paths), newest first, excluding `readme.md`.
+ */
 function newestMarkdown(dir, limit) {
   let names;
   try {
@@ -134,6 +171,13 @@ function newestMarkdown(dir, limit) {
   return scored.slice(0, limit).map((s) => s.n);
 }
 
+/**
+ * Locate this project's changelog directory, honoring an explicit config override first.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @param {object} cfg - Parsed `.claude/continuity.json`; only `cfg.changelogDir` is read.
+ * @returns {string|null} Absolute path to the changelog directory, or null when none exists.
+ */
 function findChangelogDir(root, cfg) {
   if (cfg.changelogDir) {
     const p = join(root, cfg.changelogDir);
@@ -146,6 +190,15 @@ function findChangelogDir(root, cfg) {
   return null;
 }
 
+/**
+ * Collect the most recent changelog entries for the session brief.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @param {object} cfg - Parsed `.claude/continuity.json`; only `cfg.changelogDir` is read.
+ * @returns {{label: string|null, entries: {name: string, body: string}[]}} The changelog
+ *   directory's label relative to `root`, and up to MAX_CHANGELOGS entries with truncated
+ *   bodies. `label` is null and `entries` empty when no changelog directory was found.
+ */
 function changelogs(root, cfg) {
   const dir = findChangelogDir(root, cfg);
   if (!dir) return { label: null, entries: [] };
@@ -161,6 +214,16 @@ function changelogs(root, cfg) {
   return { label: dir.slice(root.length + 1).split("\\").join("/"), entries: out };
 }
 
+/**
+ * Locate and load this project's standing decisions, whether a single file or an ADR directory.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @param {object} cfg - Parsed `.claude/continuity.json`; reads `cfg.decisionFile` and
+ *   `cfg.decisionDir`.
+ * @returns {{label: string, body: string}|null} The decision source's label relative to
+ *   `root` and its (possibly truncated) body — a bullet list of filenames for an ADR
+ *   directory, or file contents otherwise. Null when none was found.
+ */
 function decisions(root, cfg) {
   const candidates = [];
   if (cfg.decisionFile) candidates.push(join(root, cfg.decisionFile));
@@ -190,7 +253,13 @@ function decisions(root, cfg) {
   return null;
 }
 
-/** Claude Code versions are plain X.Y.Z; no prerelease handling is needed. */
+/**
+ * Claude Code versions are plain X.Y.Z; no prerelease handling is needed.
+ *
+ * @param {string} a - First version string to compare.
+ * @param {string} b - Second version string to compare.
+ * @returns {number} Negative when `a` < `b`, positive when `a` > `b`, zero when equal.
+ */
 function cmpVersion(a, b) {
   const pa = String(a).split(".");
   const pb = String(b).split(".");
@@ -208,6 +277,9 @@ function cmpVersion(a, b) {
  * acceptable on a session-startup path. An unknown version produces no warning: an
  * observability surface reports what it can see and stays silent otherwise, rather than
  * guessing and crying wolf.
+ *
+ * @returns {string|null} The running Claude Code version as `X.Y.Z`, or null when it cannot
+ *   be determined from the environment.
  */
 function claudeVersion() {
   // Only CLAUDE_CODE_EXECPATH is used. An earlier version also consulted a
@@ -248,6 +320,10 @@ function claudeVersion() {
  * Warn when this install is below the floor the setup depends on. Every feature listed in
  * version-floor.json fails silently below its version — no error, no symptom — so the
  * warning names what is inactive rather than only the number.
+ *
+ * @returns {string|null} A Markdown warning naming the running version, the floor, and
+ *   which features are inactive — or null when up to date, unknown, or `version-floor.json`
+ *   cannot be read.
  */
 function versionWarning() {
   let floor;
@@ -278,6 +354,11 @@ function versionWarning() {
  * This supports exactly one honest inference: a role that keeps returning BLOCKED is being
  * handed the wrong class of task, or handed it without enough packet. It does not know
  * why, and nothing here should be read as if it did.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @returns {string[]} Markdown bullet lines summarizing the last LEDGER_WINDOW ledger rows
+ *   per agent, plus up to 3 recent BLOCKED notes and a health warning when most rows in the
+ *   window carried no `## Result` line. Empty when the ledger is missing, oversized, or empty.
  */
 function ledger(root) {
   const file = join(root, ".claude", "worker-ledger.jsonl");
@@ -351,6 +432,11 @@ function ledger(root) {
  * three real compacted transcripts each carry a single session id, unchanged either side
  * of the compaction marker. The fallback guarded against nothing and let two concurrent
  * sessions in one project read each other's state, so it is gone.
+ *
+ * @param {object} payload - The parsed hook payload; reads `payload.session_id`.
+ * @param {string} root - Absolute path to the project root, used to derive the snapshot key.
+ * @returns {string|null} Absolute path to the snapshot file, or null when there is none, it
+ *   is unreadable, or (where `process.getuid` exists) it is not owned by this user.
  */
 function handoff(payload, root) {
   const id = typeof payload.session_id === "string" ? payload.session_id : null;
@@ -372,6 +458,14 @@ function handoff(payload, root) {
   return exact;
 }
 
+/**
+ * Assemble the full session continuity brief from all sources, capped to a total size.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @param {object} payload - The parsed SessionStart hook payload, passed through to `handoff`.
+ * @returns {string|null} The brief as Markdown, or null when there is nothing worth
+ *   surfacing (no version warning, no decisions, no changelogs, no ledger signal, no handoff).
+ */
 function build(root, payload) {
   const cfg = config(root);
   const warn = versionWarning();

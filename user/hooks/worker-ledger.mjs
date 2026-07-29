@@ -18,6 +18,12 @@ import { join, resolve, dirname } from "node:path";
 
 const MAX_NOTE_CHARS = 160;
 
+/**
+ * Read the entire hook payload from stdin synchronously.
+ *
+ * @returns {string} The raw stdin contents, or `""` if stdin cannot be read — this hook is
+ *   fail-open, so a read failure must look like "no payload" rather than throw.
+ */
 function readStdinSync() {
   try {
     return readFileSync(0, "utf8");
@@ -26,6 +32,12 @@ function readStdinSync() {
   }
 }
 
+/**
+ * Resolve the project root, preferring the environment over the payload over the cwd.
+ *
+ * @param {object} payload - The parsed hook payload; only `payload.cwd` is read.
+ * @returns {string} Absolute path to the project root.
+ */
 function projectRoot(payload) {
   const fromEnv = process.env.CLAUDE_PROJECT_DIR;
   if (fromEnv && existsSync(fromEnv)) return resolve(fromEnv);
@@ -40,6 +52,12 @@ function projectRoot(payload) {
  * workers report because they perform work, and `verifier`'s own (PASS|FAIL|BLOCKED),
  * because it executes binary predicates rather than performing work. Both land in the
  * same ledger, so both must parse.
+ *
+ * @param {object} payload - The parsed SubagentStop payload; checks
+ *   `payload.last_assistant_message` (the documented field), then the tolerated fallbacks
+ *   `payload.last_message`, `payload.output`, `payload.result`, and `payload.reason`.
+ * @returns {string|null} The uppercased result token (`DONE`, `PARTIAL`, `BLOCKED`, `PASS`,
+ *   or `FAIL`), or null when no candidate field carries a `## Result` line.
  */
 function extractResult(payload) {
   // `last_assistant_message` is the documented SubagentStop field. An earlier version read
@@ -61,6 +79,14 @@ function extractResult(payload) {
   return null;
 }
 
+/**
+ * Pull the one-line blocker description out of a `BLOCKED` worker report, if present.
+ *
+ * @param {object} payload - The parsed SubagentStop payload; reads
+ *   `payload.last_assistant_message` or, failing that, `payload.last_message`.
+ * @returns {string|null} The text following a `## Blocker` heading, truncated to
+ *   MAX_NOTE_CHARS, or null when neither field is a string or carries no such heading.
+ */
 function extractNote(payload) {
   const c = payload.last_assistant_message || payload.last_message;
   if (typeof c !== "string") return null;

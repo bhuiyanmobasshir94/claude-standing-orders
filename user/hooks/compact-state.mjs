@@ -44,6 +44,12 @@ const MAX_FILES_LISTED = 40;
 const RESULT_RE = /^##\s*Result\s*\r?\n+\s*(DONE|PARTIAL|BLOCKED|PASS|FAIL)\b/im;
 const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
 
+/**
+ * Read the entire hook payload from stdin synchronously.
+ *
+ * @returns {string} The raw stdin contents, or `""` if stdin cannot be read — this hook is
+ *   fail-open, so a read failure must look like "no payload" rather than throw.
+ */
 function readStdinSync() {
   try {
     return readFileSync(0, "utf8");
@@ -52,7 +58,12 @@ function readStdinSync() {
   }
 }
 
-/** Must resolve the same way as session-brief.mjs, or the handoff is never found. */
+/**
+ * Must resolve the same way as session-brief.mjs, or the handoff is never found.
+ *
+ * @param {object} payload - The parsed hook payload; only `payload.cwd` is read.
+ * @returns {string} Absolute path to the project root.
+ */
 function projectRoot(payload) {
   const fromEnv = process.env.CLAUDE_PROJECT_DIR;
   if (fromEnv && existsSync(fromEnv)) return resolve(fromEnv);
@@ -65,18 +76,34 @@ function projectRoot(payload) {
  * is per-user, but on Linux it is a shared `/tmp`, so a filename keyed only by session id
  * would let one project's session — or another user's — surface a snapshot that is not its
  * own. The reader also checks ownership; this keys the name so the two never even collide.
+ *
+ * @param {string} root - Absolute path to the project root.
+ * @param {string} sessionId - The session id from the hook payload.
+ * @returns {string} The snapshot filename (not a full path), keyed by project and session.
  */
 function snapshotName(root, sessionId) {
   const key = createHash("sha256").update(root).digest("hex").slice(0, 12);
   return `claude-orchestration-${key}-${sessionId}.md`;
 }
 
-/** Transcript lines wrap the API message; tolerate shapes that do not match. */
+/**
+ * Transcript lines wrap the API message; tolerate shapes that do not match.
+ *
+ * @param {object} entry - One parsed JSONL transcript line.
+ * @returns {object[]} The message's content blocks, or `[]` when the shape does not match.
+ */
 function blocks(entry) {
   const content = entry && entry.message && entry.message.content;
   return Array.isArray(content) ? content : [];
 }
 
+/**
+ * Extract the plain text carried by a `tool_result` content block.
+ *
+ * @param {object} block - A content block; reads `block.content`, which is either a string
+ *   or an array of sub-blocks each carrying `.text`.
+ * @returns {string} The block's text, or `""` when `block.content` is neither shape.
+ */
 function resultText(block) {
   if (typeof block.content === "string") return block.content;
   if (Array.isArray(block.content)) {
@@ -90,6 +117,10 @@ function resultText(block) {
  * first. Reading it all and then slicing would defeat the point of the cap and can hit
  * V8's string-length ceiling on a pathological transcript — a process-level failure that
  * the surrounding try/catch would not reliably convert into a clean exit 0.
+ *
+ * @param {string} path - Absolute path to the transcript JSONL file.
+ * @returns {string} The transcript text, or its last MAX_TRANSCRIPT_BYTES bytes (starting at
+ *   the next full line) when the file exceeds that size.
  */
 function readTranscript(path) {
   const size = statSync(path).size;
@@ -107,6 +138,17 @@ function readTranscript(path) {
   }
 }
 
+/**
+ * Walk the transcript once, collecting every worker dispatched via the `Agent` tool (with
+ * its reported outcome, if any) and every file path written by `Edit`, `Write`, or
+ * `NotebookEdit`.
+ *
+ * @param {string} text - Transcript text, one JSON object per line.
+ * @returns {{dispatched: Map<string, {agent: string, description: string,
+ *   outcome: (string|null)}>, filesTouched: Set<string>}} `dispatched` is keyed by the
+ *   `Agent` tool_use id; `outcome` is the `## Result` value matched via RESULT_RE, or null
+ *   if the worker never returned.
+ */
 function scan(text) {
   const dispatched = new Map(); // tool_use_id -> { agent, description, outcome }
   const filesTouched = new Set();
@@ -140,6 +182,15 @@ function scan(text) {
   return { dispatched, filesTouched };
 }
 
+/**
+ * Render the pre-compaction snapshot as Markdown.
+ *
+ * @param {object} payload - The parsed PreCompact hook payload; reads `payload.trigger`.
+ * @param {Map<string, {agent: string, description: string, outcome: (string|null)}>} dispatched
+ *   - Workers dispatched this session, as produced by `scan()`.
+ * @param {Set<string>} filesTouched - File paths written this session, as produced by `scan()`.
+ * @returns {string} The rendered snapshot text, terminated with a trailing newline.
+ */
 function render(payload, dispatched, filesTouched) {
   const lines = [
     `# Orchestration state captured before compaction (${payload.trigger || "unknown"} trigger)`,

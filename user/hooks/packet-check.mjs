@@ -70,6 +70,12 @@ const FIELDS = [
   ["Done means",  /(^|\n)[\s#*_>-]*(done[-\s]means|done when|acceptance|verified? (by|with))\b/i],
 ];
 
+/**
+ * Read the entire hook payload from stdin synchronously.
+ *
+ * @returns {string} The raw stdin contents, or `""` if stdin cannot be read — this hook is
+ *   fail-open, so a read failure must look like "no payload" rather than throw.
+ */
 function readStdinSync() {
   try {
     return readFileSync(0, "utf8");

@@ -78,6 +78,11 @@ const FORCE = argv.includes("--force");
 const YES = argv.includes("--yes");
 const homeFlag = argv.find((a) => a.startsWith("--home="));
 
+/**
+ * Print the CLI usage text to stdout.
+ *
+ * @returns {void}
+ */
 function usage() {
   console.log(`
 Orchestrator-worker setup installer
@@ -103,7 +108,11 @@ After installing, run \`node bootstrap.mjs doctor\`, then restart Claude Code.
 `);
 }
 
-/** Claude Code honors CLAUDE_CONFIG_DIR; otherwise the config dir is <home>/.claude. */
+/**
+ * Claude Code honors CLAUDE_CONFIG_DIR; otherwise the config dir is <home>/.claude.
+ *
+ * @returns {string} absolute path to the Claude Code config directory.
+ */
 function configDir() {
   if (homeFlag) return resolve(homeFlag.slice("--home=".length));
   if (process.env.CLAUDE_CONFIG_DIR) return resolve(process.env.CLAUDE_CONFIG_DIR);
@@ -123,7 +132,15 @@ const c = {
 
 const sha = (buf) => createHash("sha256").update(buf).digest("hex").slice(0, 16);
 
-/** Every file under ./user except the settings template, which is handled separately. */
+/**
+ * Every file under ./user except the settings template, which is handled separately.
+ *
+ * @param {string} dir - directory to walk.
+ * @param {string} [base] - root directory that returned paths are made relative to;
+ *   defaults to `dir` on the initial call.
+ * @param {string[]} [acc] - accumulator of relative paths collected so far.
+ * @returns {string[]} relative paths (forward-slash separated) of every file under `dir`.
+ */
 function walk(dir, base = dir, acc = []) {
   for (const name of readdirSync(dir)) {
     const full = join(dir, name);
@@ -133,6 +150,12 @@ function walk(dir, base = dir, acc = []) {
   return acc;
 }
 
+/**
+ * Read the install manifest, tolerating a missing or unparseable file.
+ *
+ * @returns {{files: object, version: string|null}} the parsed manifest, or
+ *   `{ files: {}, version: null }` when the manifest does not exist or is not valid JSON.
+ */
 function loadManifest() {
   if (!existsSync(MANIFEST)) return { files: {}, version: null };
   try {
@@ -187,6 +210,9 @@ const DEPRECATED_HOOKS = [
  * Removes only the individual hook whose command matches, then drops the group and the event
  * if that left them empty — an empty `{"hooks":[]}` group is noise that survives forever
  * otherwise. Any co-located entry belonging to a plugin or to the user is untouched.
+ *
+ * @param {object} settings - merged settings object; `settings.hooks` is mutated in place.
+ * @returns {string[][]} `[label, why]` pairs for each hook entry removed.
  */
 function removeDeprecatedHooks(settings) {
   const removed = [];
@@ -210,6 +236,12 @@ function removeDeprecatedHooks(settings) {
   return removed;
 }
 
+/**
+ * Whether `v` is a plain object — not `null`, not an array, and not some other type.
+ *
+ * @param {*} v - value to test.
+ * @returns {boolean} true when `v` is a plain object.
+ */
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
@@ -226,6 +258,10 @@ function isPlainObject(v) {
  * This comment previously claimed non-`hooks` arrays were "replaced only when the target
  * does not already define them", which the code never did: the two branches were
  * byte-identical. Concatenation is the real and intended behavior.
+ *
+ * @param {object} existing - the settings object already on disk (or `{}`).
+ * @param {object} incoming - the settings object being merged in.
+ * @returns {object} a new, deep-merged settings object.
  */
 function mergeSettings(existing, incoming) {
   const out = { ...existing };
@@ -243,6 +279,13 @@ function mergeSettings(existing, incoming) {
   return out;
 }
 
+/**
+ * Copy `file` to a timestamped `.backup-<ISO date>` sibling before it is overwritten.
+ * Under `--dry-run` the path is still computed and returned, but nothing is written.
+ *
+ * @param {string} file - absolute path of the file to back up.
+ * @returns {string|null} path of the backup file, or `null` when `file` does not exist.
+ */
 function backup(file) {
   if (!existsSync(file)) return null;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
@@ -251,6 +294,13 @@ function backup(file) {
   return dst;
 }
 
+/**
+ * Copy every file under ./user (except the settings template) into the config dir,
+ * skipping any file that has been modified locally unless `--force` is set.
+ *
+ * @returns {{next: object, written: number, skipped: number, unchanged: number}} `next` is the
+ *   manifest's updated file-hash map; the counts describe what happened to each file.
+ */
 function installFiles() {
   if (!existsSync(SRC)) {
     console.error(c.red(`No ./user directory next to bootstrap.mjs (looked in ${SRC})`));
@@ -307,6 +357,10 @@ function installFiles() {
  * would eventually drift and leave uninstall unable to recognize its own entries.
  *
  * Returns null when there is no template, `exit(1)` when the template is unparseable.
+ *
+ * @returns {object|null} the rendered settings object, or `null` when there is no template
+ *   file; exits the process with status 1 if the template is not valid JSON after
+ *   substitution.
  */
 function renderTemplate() {
   const tplPath = join(SRC, "settings.template.json");
@@ -329,6 +383,12 @@ function renderTemplate() {
   }
 }
 
+/**
+ * Merge this package's rendered settings into the machine's settings.json, backing up the
+ * existing file first and dropping any deprecated key or hook along the way.
+ *
+ * @returns {{changed: boolean}} whether settings.json was written.
+ */
 function installSettings() {
   const incoming = renderTemplate();
   if (!incoming) return { changed: false };
@@ -374,6 +434,11 @@ function installSettings() {
   return { changed: true };
 }
 
+/**
+ * Warn when the running Node is older than the hooks target.
+ *
+ * @returns {void}
+ */
 function checkNode() {
   const major = Number(process.versions.node.split(".")[0]);
   if (Number.isFinite(major) && major < 18) {
@@ -381,6 +446,11 @@ function checkNode() {
   }
 }
 
+/**
+ * Run the `install` command: copy files, merge settings, and write the manifest.
+ *
+ * @returns {void}
+ */
 function doInstall() {
   console.log(c.bold(`\nInstalling orchestrator–worker setup`));
   console.log(c.dim(`  source: ${SRC}`));
@@ -410,6 +480,11 @@ function doInstall() {
   console.log("  3. " + c.bold("/context") + " and " + c.bold("/status") + "        confirm the policy loaded and the model is right\n");
 }
 
+/**
+ * Run the `status` command: report which installed files differ from this repo by hash.
+ *
+ * @returns {void}
+ */
 function doStatus() {
   const manifest = loadManifest();
   console.log(c.bold(`\nOrchestrator setup status`));
@@ -444,7 +519,13 @@ function doStatus() {
   );
 }
 
-/** Claude Code versions are plain X.Y.Z; no prerelease handling is needed. */
+/**
+ * Claude Code versions are plain X.Y.Z; no prerelease handling is needed.
+ *
+ * @param {string} a - first version string.
+ * @param {string} b - second version string.
+ * @returns {number} negative if `a` < `b`, positive if `a` > `b`, `0` if equal.
+ */
 function cmpVersion(a, b) {
   const pa = String(a).split(".");
   const pb = String(b).split(".");
@@ -459,6 +540,9 @@ function cmpVersion(a, b) {
  * Authoritative but slow — measured at 0.26-1.51s. Acceptable in a command the user ran on
  * purpose; deliberately not used by the session-start hook, which derives the version from
  * the environment instead.
+ *
+ * @returns {string|null} the running Claude Code version (e.g. `"2.1.219"`), or `null` when
+ *   `claude --version` could not be run or its output did not match.
  */
 function claudeVersion() {
   try {
@@ -473,6 +557,11 @@ function claudeVersion() {
  * Read the first `---` fenced block of an agent definition. Enough for model, effort, and
  * skills; deliberately not a YAML parser, because adding a dependency to this installer
  * would cost more than the cases it would cover.
+ *
+ * @param {string} text - full contents of an agent definition file.
+ * @returns {object|null} `{ skills: string[], ...otherKeys }` parsed from the frontmatter,
+ *   with `otherKeys` populated from top-level `key: value` lines (e.g. `model`, `effort`);
+ *   `null` when the file has no `---` fenced block.
  */
 function frontmatter(text) {
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -536,6 +625,13 @@ const ALT_PROVIDER =
   (process.env.CLAUDE_CODE_USE_VERTEX === "1" && "Vertex") ||
   null;
 
+/**
+ * Run the `doctor` command: check that the install actually works on this machine —
+ * file drift, the Claude Code version floor, settings.json integrity, hook script paths,
+ * and agent `skills`/`effort` declarations — then exit 1 if any check failed.
+ *
+ * @returns {void}
+ */
 function doDoctor() {
   const checks = [];
   const add = (name, ok, detail) => checks.push({ name, ok, detail });
@@ -770,6 +866,15 @@ function doDoctor() {
  * the first install with a different value. The merge overwrote it and kept no record, so
  * the original is unrecoverable here. The timestamped backups are the recovery path, and
  * uninstall writes a fresh one before touching anything.
+ *
+ * @param {object} target - the current settings object to subtract from.
+ * @param {object} template - this package's rendered settings (see `renderTemplate`).
+ * @param {string} [path] - dotted key path of the current recursion, for reporting; empty
+ *   at the top-level call.
+ * @param {string[]} [removed] - accumulator of dotted key paths removed so far.
+ * @param {string[]} [kept] - accumulator of dotted key paths kept because they changed since
+ *   install.
+ * @returns {[object, string[], string[]]} `[prunedTarget, removed, kept]`.
  */
 function subtractSettings(target, template, path = "", removed = [], kept = []) {
   const out = { ...target };
@@ -809,6 +914,8 @@ function subtractSettings(target, template, path = "", removed = [], kept = []) 
  * Because it deletes, this command is inert without `--yes`. A mistyped `uninstall` printing
  * a plan costs nothing; one that runs costs a config directory. The plan is the same text
  * either way, so what you approve is what happens.
+ *
+ * @returns {void}
  */
 function doUninstall() {
   const APPLY = YES && !DRY;
