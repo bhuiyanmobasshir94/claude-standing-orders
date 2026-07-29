@@ -29,24 +29,35 @@ own practice, it is product — leave it.
 
 ## Conventions
 
-- **Aliases, never version numbers, in config.** Agents pin `opus` / `sonnet` / `haiku`.
-  Model versions and version floors appear in `docs/DESIGN-RATIONALE.md` and nowhere else.
+- **Aliases, never version numbers, in agent config.** Agents pin `opus` / `sonnet` /
+  `haiku`. The one exception is the Claude Code version floor, which is a real runtime
+  dependency rather than a model choice: it lives in `user/version-floor.json` and nowhere
+  else. `bootstrap.mjs` substitutes it into `settings.template.json` at install time
+  (`__MIN_VERSION__`), `session-brief.mjs` warns against it, and `bootstrap.mjs doctor`
+  checks it. Never restate the number in prose — reference the file.
 - **No `effort` field on a `model: haiku` agent.** Haiku does not support effort levels; the
   setting is silently ignored, which asserts a guarantee the runtime never provides.
 - **Nothing personal ships.** No real names, absolute home paths, private project names, or
   content from a private conversation — in any file, including docs and comments.
 - **Hook paths are generated, not committed.** `settings.template.json` carries
   `__CLAUDE_HOME__`; `bootstrap.mjs` resolves it per machine.
-- **Observability hooks fail open.** `session-brief.mjs` and `worker-ledger.mjs` must exit 0
-  on every path, including malformed input. A broken hook must never block a session.
+- **Observability hooks fail open.** `session-brief.mjs`, `worker-ledger.mjs`,
+  `packet-check.mjs`, and `compact-state.mjs` must exit 0 on every path, including malformed
+  input. There is no authorization boundary among them: `packet-check.mjs` warns and cannot
+  block (`SubagentStart` does not allow it), and `compact-state.mjs` must never block
+  compaction even though `PreCompact` would permit it.
+- **No subprocess on the session-start path.** `session-brief.mjs` derives the Claude Code
+  version from `CLAUDE_CODE_EXECPATH` and stays silent when it cannot. `claude --version`
+  costs 0.26–1.5s and belongs in `doctor`, which the user ran on purpose.
 
 ## After changing anything under `user/`
 
 The installed copy in `~/.claude/` does not update itself. Run:
 
 ```bash
-node bootstrap.mjs status     # show drift
+node bootstrap.mjs status     # show drift (file hashes only)
 node bootstrap.mjs install    # sync this machine
+node bootstrap.mjs doctor     # confirm the install actually works; exits 1 on failure
 ```
 
 A fix committed here but not installed is not active anywhere.
@@ -54,7 +65,7 @@ A fix committed here but not installed is not active anywhere.
 ## Verifying a change
 
 ```bash
-for f in bootstrap.mjs user/hooks/session-brief.mjs user/hooks/worker-ledger.mjs; do
+for f in bootstrap.mjs user/hooks/*.mjs; do
   node --check "$f" || echo "FAILED: $f"
 done
 ```

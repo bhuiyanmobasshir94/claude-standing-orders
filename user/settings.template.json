@@ -3,7 +3,9 @@
 
   "model": "opus",
   "effortLevel": "xhigh",
-  "fallbackModel": ["claude-sonnet-5"],
+
+  "minimumVersion": "__MIN_VERSION__",
+  "autoUpdatesChannel": "stable",
 
   "autoMemoryEnabled": true,
   "alwaysThinkingEnabled": true,
@@ -26,6 +28,18 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "matcher": "implementer|fast-implementer|reviewer",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__CLAUDE_HOME__/hooks/packet-check.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "hooks": [
@@ -37,10 +51,29 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__CLAUDE_HOME__/hooks/compact-state.mjs\"",
+            "timeout": 15,
+            "statusMessage": "Capturing orchestration state..."
+          }
+        ]
+      }
     ]
   },
 
   "permissions": {
+    "ask": [
+      "Bash(rm -rf *)",
+      "Bash(rm -fr *)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -fd*)"
+    ],
     "deny": [
       "Read(./.env)",
       "Read(./.env.*)",

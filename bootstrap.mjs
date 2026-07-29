@@ -10,6 +10,12 @@
  *   node bootstrap.mjs install     copy files, merge settings (default)
  *   node bootstrap.mjs status      show what is installed and whether it matches this repo
  *   node bootstrap.mjs diff        list files that differ from this repo
+ *   node bootstrap.mjs doctor      check that the install actually works; exit 1 on failure
+ *
+ * `status` compares file hashes and nothing else. `doctor` answers the different and more
+ * useful question of whether this machine can run the setup: Claude Code version against
+ * the floor, hook paths that resolve here, settings that still parse after the merge, and
+ * agent definitions that do not assert capabilities the model does not have.
  *
  * Flags:
  *   --dry-run    print what would change, write nothing
@@ -27,9 +33,23 @@ import { join, resolve, relative, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, "user");
+
+/**
+ * The version floor lives in exactly one file. Everything else — the `minimumVersion` key
+ * substituted into settings, the session-brief warning, and the doctor check below —
+ * reads it from there rather than restating the number.
+ */
+const FLOOR = (() => {
+  try {
+    return JSON.parse(readFileSync(join(SRC, "version-floor.json"), "utf8"));
+  } catch {
+    return { minimumVersion: null, features: [] };
+  }
+})();
 
 const argv = process.argv.slice(2);
 const cmd = argv.find((a) => !a.startsWith("--")) || "install";
@@ -75,6 +95,25 @@ function loadManifest() {
     return { files: {}, version: null };
   }
 }
+
+/**
+ * Keys this package once installed and has since deliberately retired.
+ *
+ * The settings merge is additive: it adds and overrides, but never deletes. So dropping a
+ * key from `settings.template.json` removes it for a fresh install and leaves it in place
+ * on every machine that already has it — which is exactly the silent divergence this
+ * package exists to prevent. A retired key has to be named here to actually go away.
+ *
+ * Removal is reported on stdout and the previous settings.json is backed up first. Only add
+ * a key here when its removal is a deliberate decision, never to tidy someone's settings.
+ */
+const DEPRECATED_KEYS = [
+  [
+    "fallbackModel",
+    "silently downgraded the orchestrator to a worker tier when Opus was overloaded; " +
+      "a visible failure is better than an invisible demotion",
+  ],
+];
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -168,7 +207,11 @@ function installSettings() {
   // The hook paths are genuinely machine-specific, so they are resolved at install time
   // rather than carried as a literal in the repo. JSON-encoding handles Windows separators.
   const home = DEST.split("\\").join("/");
-  const tpl = readFileSync(tplPath, "utf8").split("__CLAUDE_HOME__").join(home);
+  const tpl = readFileSync(tplPath, "utf8")
+    .split("__CLAUDE_HOME__")
+    .join(home)
+    .split("__MIN_VERSION__")
+    .join(FLOOR.minimumVersion || "0.0.0");
 
   let incoming;
   try {
@@ -193,6 +236,15 @@ function installSettings() {
   }
 
   const merged = mergeSettings(existing, incoming);
+
+  const retired = [];
+  for (const [key, why] of DEPRECATED_KEYS) {
+    if (key in merged) {
+      delete merged[key];
+      retired.push([key, why]);
+    }
+  }
+
   const before = JSON.stringify(existing);
   const after = JSON.stringify(merged);
   if (before === after) {
@@ -203,6 +255,9 @@ function installSettings() {
   const bak = backup(target);
   if (!DRY) writeFileSync(target, JSON.stringify(merged, null, 2) + "\n", "utf8");
   console.log(c.green("  merge  settings.json") + (bak ? c.dim(`  (backup: ${relative(DEST, bak)})`) : ""));
+  for (const [key, why] of retired) {
+    console.log(c.yellow(`  remove settings.${key}`) + c.dim(`  — ${why}`));
+  }
   return { changed: true };
 }
 
@@ -265,9 +320,233 @@ function doStatus() {
   }
   console.log(
     drift === 0
-      ? c.green("\n  In sync with this repo.\n")
-      : c.yellow(`\n  ${drift} file(s) out of sync — run: node bootstrap.mjs install\n`)
+      ? c.green("\n  In sync with this repo.")
+      : c.yellow(`\n  ${drift} file(s) out of sync — run: node bootstrap.mjs install`)
   );
+  console.log(
+    c.dim("  Files only — this says nothing about whether the install works.\n" +
+          "  Run `node bootstrap.mjs doctor` for that.\n")
+  );
+}
+
+/** Claude Code versions are plain X.Y.Z; no prerelease handling is needed. */
+function cmpVersion(a, b) {
+  const pa = String(a).split(".");
+  const pb = String(b).split(".");
+  for (let i = 0; i < 3; i++) {
+    const d = (Number(pa[i]) || 0) - (Number(pb[i]) || 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Authoritative but slow — measured at 0.26-1.51s. Acceptable in a command the user ran on
+ * purpose; deliberately not used by the session-start hook, which derives the version from
+ * the environment instead.
+ */
+function claudeVersion() {
+  try {
+    const out = execFileSync("claude", ["--version"], { encoding: "utf8", timeout: 20000 });
+    return (out.match(/(\d+\.\d+\.\d+)/) || [])[1] || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the first `---` fenced block of an agent definition. Enough for model, effort, and
+ * skills; deliberately not a YAML parser, because adding a dependency to this installer
+ * would cost more than the cases it would cover.
+ */
+function frontmatter(text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return null;
+  const out = { skills: [] };
+  let inSkills = false;
+  for (const line of m[1].split(/\r?\n/)) {
+    const item = line.match(/^\s+-\s+(\S+)/);
+    if (inSkills && item) {
+      out.skills.push(item[1]);
+      continue;
+    }
+    const kv = line.match(/^([A-Za-z][\w-]*):\s*(.*)$/);
+    if (!kv) continue;
+    inSkills = false;
+    if (kv[1] === "skills") {
+      inSkills = true;
+      if (kv[2].trim()) out.skills.push(kv[2].trim());
+    } else {
+      out[kv[1]] = kv[2].trim();
+    }
+  }
+  return out;
+}
+
+/**
+ * Models that accept an `effort` field, per code.claude.com/docs/en/model-config: Fable 5,
+ * Opus 5, Sonnet 5, Opus 4.8, Opus 4.7, Opus 4.6, and Sonnet 4.6. Haiku is absent from that
+ * table, so `effort` on a haiku agent asserts a guarantee the runtime never provides.
+ * Anything not matched here is treated as effort-incapable.
+ */
+const EFFORT_CAPABLE = /^(opus|sonnet|fable)$|opus-5|sonnet-5|fable-5|opus-4-8|opus-4-7|opus-4-6|sonnet-4-6/i;
+
+function doDoctor() {
+  const checks = [];
+  const add = (name, ok, detail) => checks.push({ name, ok, detail });
+
+  // 1. File drift. A file that differs because the repo moved ahead is stale and fails. A
+  // file the user deliberately edited is a choice, not a defect: `install` already refuses
+  // to clobber it, so reporting it as a failure would only teach the reader to ignore this
+  // command. The manifest distinguishes the two — it records what was last written here,
+  // so an installed file that no longer matches it was edited locally.
+  const manifest = loadManifest();
+  const files = walk(SRC).filter((f) => f !== "settings.template.json");
+  const stale = [];
+  const localEdits = [];
+  for (const rel of files) {
+    const to = join(DEST, ...rel.split("/"));
+    if (!existsSync(to)) {
+      stale.push(rel);
+      continue;
+    }
+    const installedHash = sha(readFileSync(to));
+    if (installedHash === sha(readFileSync(join(SRC, ...rel.split("/"))))) continue;
+    const knownHash = manifest.files && manifest.files[rel];
+    if (knownHash && knownHash !== installedHash) localEdits.push(rel);
+    else stale.push(rel);
+  }
+  const detail = [
+    stale.length ? `${stale.length} stale: ${stale.slice(0, 5).join(", ")}` : null,
+    localEdits.length
+      ? `${localEdits.length} locally modified and kept: ${localEdits.slice(0, 5).join(", ")}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("; ");
+  add(
+    "installed files match this repo",
+    stale.length === 0,
+    detail || `${files.length} files`
+  );
+
+  // 2. Claude Code version against the floor.
+  const running = claudeVersion();
+  const floorName = `Claude Code >= ${FLOOR.minimumVersion || "(floor unreadable)"}`;
+  if (!FLOOR.minimumVersion) {
+    add(floorName, false, "user/version-floor.json is missing or unreadable");
+  } else if (!running) {
+    add(floorName, false, "`claude --version` did not run — is claude on PATH?");
+  } else {
+    const ok = cmpVersion(running, FLOOR.minimumVersion) >= 0;
+    const inactive = (FLOOR.features || [])
+      .filter((f) => Array.isArray(f) && cmpVersion(running, f[0]) < 0)
+      .map((f) => f[1]);
+    add(floorName, ok, ok ? running : `${running} — inactive: ${inactive.join(", ")}`);
+  }
+
+  // 3. settings.json parses, and our keys survived the merge.
+  const settingsPath = join(DEST, "settings.json");
+  let settings = null;
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    add("settings.json is valid JSON", true, settingsPath);
+    const missing = ["model", "effortLevel", "env", "hooks"].filter((k) => !(k in settings));
+    add(
+      "orchestrator keys present after merge",
+      missing.length === 0,
+      missing.length ? `missing: ${missing.join(", ")}` : "model, effortLevel, env, hooks"
+    );
+  } catch (e) {
+    add("settings.json is valid JSON", false, `${settingsPath}: ${e.message}`);
+    add("orchestrator keys present after merge", false, "settings.json could not be read");
+  }
+
+  // 4. Every hook command path resolves on this machine. A check with nothing to inspect
+  // is not a pass: unreadable settings means unknown, and unknown fails.
+  if (!settings) {
+    add("hook and statusLine paths resolve", false, "settings.json could not be read");
+  } else {
+    // Script paths in settings are absolute and machine-specific, whoever wrote them. A
+    // path installed on a laptop is the most common way a config breaks on a server, so
+    // statusLine is checked alongside hooks rather than left as someone else's problem.
+    const scripts = [];
+    for (const groups of Object.values(settings.hooks || {})) {
+      for (const g of groups || []) {
+        for (const h of g.hooks || []) scripts.push(h.command);
+      }
+    }
+    if (settings.statusLine && settings.statusLine.command) {
+      scripts.push(settings.statusLine.command);
+    }
+
+    const badHooks = [];
+    let hookCount = 0;
+    for (const cmd of scripts) {
+      const match = String(cmd || "").match(/"([^"]+\.(?:mjs|js|sh|py))"|(\S+\.(?:mjs|js|sh|py))/);
+      const p = match && (match[1] || match[2]);
+      if (!p) continue; // e.g. `rtk hook claude` — a PATH lookup, not a file we can check
+      hookCount++;
+      if (!existsSync(p)) badHooks.push(p);
+    }
+    add(
+      "hook and statusLine paths resolve",
+      badHooks.length === 0,
+      badHooks.length ? `missing: ${badHooks.join(", ")}` : `${hookCount} script path(s)`
+    );
+  }
+
+  // 5 and 6. Agent skills resolve; no effort declared on an effort-incapable model.
+  const badSkills = [];
+  const badEffort = [];
+  const agentDir = join(DEST, "agents");
+  const agents = existsSync(agentDir)
+    ? readdirSync(agentDir).filter((n) => n.endsWith(".md"))
+    : [];
+  for (const name of agents) {
+    let fm;
+    try {
+      fm = frontmatter(readFileSync(join(agentDir, name), "utf8"));
+    } catch {
+      continue;
+    }
+    if (!fm) continue;
+    for (const s of fm.skills) {
+      // Plugin-scoped skills belong to a plugin's install, not to this package.
+      if (s.includes(":")) continue;
+      if (!existsSync(join(DEST, "skills", s, "SKILL.md"))) badSkills.push(`${name} -> ${s}`);
+    }
+    // `inherit` (and an absent `model`, which means the same thing) resolves to the main
+    // conversation's model, so whether it supports effort is not knowable from this file.
+    // Flagging it would be a false positive, not a finding.
+    if (fm.effort && fm.model && fm.model !== "inherit" && !EFFORT_CAPABLE.test(fm.model)) {
+      badEffort.push(`${name}: effort: ${fm.effort} on model: ${fm.model}`);
+    }
+  }
+  add(
+    "agent `skills:` entries resolve",
+    badSkills.length === 0,
+    badSkills.length ? badSkills.join("; ") : `${agents.length} agent(s)`
+  );
+  add(
+    "no `effort` on an effort-incapable model",
+    badEffort.length === 0,
+    badEffort.length ? badEffort.join("; ") : `${agents.length} agent(s)`
+  );
+
+  console.log(c.bold(`\nOrchestrator doctor`));
+  console.log(c.dim(`  config dir: ${DEST}\n`));
+  for (const ch of checks) {
+    console.log(`  ${ch.ok ? c.green("PASS") : c.red("FAIL")}  ${ch.name}`);
+    if (ch.detail) console.log(c.dim(`        ${ch.detail}`));
+  }
+  const failed = checks.filter((ch) => !ch.ok).length;
+  console.log(
+    failed === 0
+      ? c.green(`\n  ${checks.length} checks passed.\n`)
+      : c.red(`\n  ${failed} of ${checks.length} checks failed.\n`)
+  );
+  process.exit(failed === 0 ? 0 : 1);
 }
 
 switch (cmd) {
@@ -278,7 +557,10 @@ switch (cmd) {
   case "diff":
     doStatus();
     break;
+  case "doctor":
+    doDoctor();
+    break;
   default:
-    console.error(`Unknown command "${cmd}". Use: install | status | diff`);
+    console.error(`Unknown command "${cmd}". Use: install | status | diff | doctor`);
     process.exit(1);
 }

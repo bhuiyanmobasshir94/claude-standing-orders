@@ -4,7 +4,13 @@
  *
  * Reads whatever continuity files this repository keeps and injects a compact brief into
  * the new session, so a session on a server starts from the same history as a session on
- * a laptop.
+ * a laptop. The brief carries, in order:
+ *
+ *   - a warning when the running Claude Code is below `version-floor.json`, naming which
+ *     features are silently inactive;
+ *   - the orchestration snapshot `compact-state.mjs` wrote before the last compaction;
+ *   - the repository's standing decisions and recent session changelogs;
+ *   - a rollup of the worker ledger as a routing signal.
  *
  * Locations are discovered, not assumed. In order of precedence:
  *
@@ -25,7 +31,13 @@
  */
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+
+/** This file installs to <claude home>/hooks/, so the config dir is one level up. */
+const HOOK_HOME = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const CHANGELOG_DIRS = [
   "docs/changelogs",
@@ -49,8 +61,12 @@ const DECISION_PATHS = [
 const MAX_CHANGELOGS = 3;
 const MAX_LINES_PER_ENTRY = 24;
 const MAX_DECISION_LINES = 40;
-const MAX_LEDGER_ENTRIES = 8;
 const MAX_TOTAL_CHARS = 8000;
+
+/** How many ledger rows the routing rollup considers. Older runs are not evidence today. */
+const LEDGER_WINDOW = 40;
+/** A compaction handoff older than this belongs to a different session; ignore it. */
+const HANDOFF_MAX_AGE_MS = 15 * 60 * 1000;
 
 function readStdinSync() {
   try {
@@ -176,20 +192,102 @@ function decisions(root, cfg) {
   return null;
 }
 
+/** Claude Code versions are plain X.Y.Z; no prerelease handling is needed. */
+function cmpVersion(a, b) {
+  const pa = String(a).split(".");
+  const pb = String(b).split(".");
+  for (let i = 0; i < 3; i++) {
+    const d = (Number(pa[i]) || 0) - (Number(pb[i]) || 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Best-effort running version, derived from the environment only.
+ *
+ * This never spawns a process. `claude --version` was measured at 0.26-1.51s, which is not
+ * acceptable on a session-startup path. An unknown version produces no warning: an
+ * observability surface reports what it can see and stays silent otherwise, rather than
+ * guessing and crying wolf.
+ */
+function claudeVersion() {
+  const fromEnv = process.env.CLAUDE_CODE_VERSION;
+  if (fromEnv && /^\d+\.\d+\.\d+/.test(fromEnv)) return fromEnv.match(/^\d+\.\d+\.\d+/)[0];
+
+  const exec = process.env.CLAUDE_CODE_EXECPATH;
+  if (!exec) return null;
+
+  // Native installer layout: .../claude/versions/2.1.220/...
+  const seg = exec.split(/[\\/]/).find((s) => /^\d+\.\d+\.\d+$/.test(s));
+  if (seg) return seg;
+
+  // npm layout: .../@anthropic-ai/claude-code/bin/claude.exe — walk up to the package root.
+  let dir = dirname(exec);
+  for (let i = 0; i < 4; i++) {
+    try {
+      const version = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version;
+      if (typeof version === "string" && /^\d+\.\d+\.\d+/.test(version)) {
+        return version.match(/^\d+\.\d+\.\d+/)[0];
+      }
+    } catch {
+      /* not the package root — keep walking */
+    }
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+/**
+ * Warn when this install is below the floor the setup depends on. Every feature listed in
+ * version-floor.json fails silently below its version — no error, no symptom — so the
+ * warning names what is inactive rather than only the number.
+ */
+function versionWarning() {
+  let floor;
+  try {
+    floor = JSON.parse(readFileSync(join(HOOK_HOME, "version-floor.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  const running = claudeVersion();
+  if (!running || !floor.minimumVersion) return null;
+  if (cmpVersion(running, floor.minimumVersion) >= 0) return null;
+
+  const rows = (floor.features || [])
+    .filter((f) => Array.isArray(f) && cmpVersion(running, f[0]) < 0)
+    .map((f) => `- \`${f[1]}\` — ${f[2]}`);
+
+  return (
+    `## Claude Code ${running} is below this setup's floor (${floor.minimumVersion})\n\n` +
+    `Inactive on this install:\n\n${rows.join("\n")}\n\n` +
+    "Run `claude update`, then `node bootstrap.mjs doctor` to confirm. Until then, do not " +
+    "rely on worker nesting being capped."
+  );
+}
+
+/**
+ * Roll the worker ledger up into a routing signal.
+ *
+ * This supports exactly one honest inference: a role that keeps returning BLOCKED is being
+ * handed the wrong class of task, or handed it without enough packet. It does not know
+ * why, and nothing here should be read as if it did.
+ */
 function ledger(root) {
   const file = join(root, ".claude", "worker-ledger.jsonl");
   if (!existsSync(file)) return [];
+
+  let rows;
   try {
     if (statSync(file).size > 2_000_000) return [];
-    return readFileSync(file, "utf8")
+    rows = readFileSync(file, "utf8")
       .trim()
       .split(/\r?\n/)
       .filter(Boolean)
-      .slice(-MAX_LEDGER_ENTRIES)
+      .slice(-LEDGER_WINDOW)
       .map((line) => {
         try {
-          const e = JSON.parse(line);
-          return `- ${e.at} · ${e.agent} → ${e.result || "unknown"}${e.note ? ` — ${e.note}` : ""}`;
+          return JSON.parse(line);
         } catch {
           return null;
         }
@@ -198,21 +296,110 @@ function ledger(root) {
   } catch {
     return [];
   }
+  if (!rows.length) return [];
+
+  const byAgent = new Map();
+  for (const e of rows) {
+    const a = byAgent.get(e.agent) || { n: 0, DONE: 0, PARTIAL: 0, BLOCKED: 0, PASS: 0, FAIL: 0 };
+    a.n++;
+    if (e.result && a[e.result] !== undefined) a[e.result]++;
+    byAgent.set(e.agent, a);
+  }
+
+  const out = [];
+  for (const [agent, a] of byAgent) {
+    const tally = ["DONE", "PARTIAL", "BLOCKED", "PASS", "FAIL"]
+      .filter((k) => a[k])
+      .map((k) => `${a[k]} ${k}`);
+    out.push(`- **${agent}** — ${a.n} run(s)${tally.length ? `: ${tally.join(", ")}` : ""}`);
+  }
+
+  for (const b of rows.filter((e) => e.result === "BLOCKED" && e.note).slice(-3)) {
+    out.push(`  - blocked: ${b.note}`);
+  }
+
+  // Silence here means the report contract or the ledger hook is broken, not that every
+  // worker succeeded. Exactly this failure hid behind a wrong payload key for every row
+  // the ledger had ever written; the rollup is required to notice it out loud.
+  if (rows.length >= 5 && rows.every((e) => !e.result)) {
+    out.push(
+      "- No worker reported a `## Result` line across the whole window — the report " +
+        "contract or the ledger hook is not working. Run `node bootstrap.mjs doctor`."
+    );
+  }
+  return out;
 }
 
-function build(root) {
+/**
+ * Find the snapshot `compact-state.mjs` wrote before the last compaction, if this session
+ * is the one it belongs to. A compaction may hand the session a new id, so a recent
+ * handoff is accepted as a fallback; anything older than the cutoff is another session's
+ * residue and is ignored.
+ */
+function handoff(payload, root) {
+  // Must match compact-state.mjs `snapshotName` exactly, or nothing is ever found.
+  const prefix = `claude-orchestration-${createHash("sha256")
+    .update(root)
+    .digest("hex")
+    .slice(0, 12)}-`;
+  const mine = (file) => {
+    // On Linux the temp dir is a shared /tmp. Only read a snapshot this user owns.
+    if (typeof process.getuid !== "function") return true;
+    try {
+      return statSync(file).uid === process.getuid();
+    } catch {
+      return false;
+    }
+  };
+
+  const id = typeof payload.session_id === "string" ? payload.session_id : null;
+  if (id) {
+    const exact = join(tmpdir(), `${prefix}${id}.md`);
+    if (existsSync(exact) && mine(exact)) return exact;
+  }
+  try {
+    const recent = readdirSync(tmpdir())
+      .filter((n) => n.startsWith(prefix) && n.endsWith(".md"))
+      .map((n) => ({ p: join(tmpdir(), n), t: statSync(join(tmpdir(), n)).mtimeMs }))
+      .filter((f) => Date.now() - f.t < HANDOFF_MAX_AGE_MS && mine(f.p))
+      .sort((a, b) => b.t - a.t);
+    return recent.length ? recent[0].p : null;
+  } catch {
+    return null;
+  }
+}
+
+function build(root, payload) {
   const cfg = config(root);
+  const warn = versionWarning();
   const dec = decisions(root, cfg);
   const { label: clLabel, entries } = changelogs(root, cfg);
   const led = ledger(root);
 
-  if (!dec && entries.length === 0 && led.length === 0) return null;
+  let carried = null;
+  const handoffPath = handoff(payload, root);
+  if (handoffPath) {
+    try {
+      const body = readFileSync(handoffPath, "utf8").trim();
+      if (body) carried = head(body, 60);
+    } catch {
+      /* a handoff that cannot be read is simply absent */
+    }
+  }
+
+  if (!warn && !dec && entries.length === 0 && led.length === 0 && !carried) return null;
 
   const parts = [
     "# Session continuity brief",
     "Committed history for this repository. Align today's work with what follows; " +
       "if you intend to contradict any of it, say so explicitly first.",
   ];
+
+  // The version warning goes first: it is the one item that changes whether anything else
+  // in this brief can be trusted, and first position survives the truncation cap below.
+  if (warn) parts.push(`\n${warn}`);
+
+  if (carried) parts.push(`\n## Orchestration state carried through compaction\n\n${carried}`);
 
   if (dec) parts.push(`\n## Standing decisions (${dec.label})\n\n${dec.body}`);
 
@@ -221,7 +408,9 @@ function build(root) {
     for (const e of entries) parts.push(`\n### ${e.name}\n\n${e.body}`);
   }
 
-  if (led.length) parts.push(`\n## Recent worker activity\n\n${led.join("\n")}`);
+  if (led.length) {
+    parts.push(`\n## Worker routing signal (last ${LEDGER_WINDOW} runs)\n\n${led.join("\n")}`);
+  }
 
   let text = parts.join("\n");
   if (text.length > MAX_TOTAL_CHARS) {
@@ -243,7 +432,7 @@ try {
     }
   }
 
-  const brief = build(projectRoot(payload));
+  const brief = build(projectRoot(payload), payload);
   if (brief) {
     process.stdout.write(
       JSON.stringify({

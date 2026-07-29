@@ -25,13 +25,12 @@ Install the orchestrator-worker setup in this directory onto this machine.
    timestamped backup. If it reports files skipped as locally modified, show me each
    diff and ask before using --force.
 
-4. Verify and report as a table:
-   - `node bootstrap.mjs status` shows everything in sync
-   - ~/.claude/agents/ contains implementer, fast-implementer, reviewer, verifier
-   - ~/.claude/skills/ contains worker-contract and orchestration-onboard
-   - ~/.claude/settings.json parses as valid JSON and still contains every key it had
-     before the install
-   - both hook commands in settings.json point at paths that exist on THIS machine
+4. Run `node bootstrap.mjs doctor` and show me every check with its result. It covers file
+   drift, the Claude Code version floor, settings.json validity, hook path resolution,
+   agent skill resolution, and effort declared on a model that does not support it. A
+   non-zero exit means something is wrong — do not report success over it. Then confirm
+   separately that ~/.claude/agents/ contains implementer, fast-implementer, reviewer, and
+   verifier, and that ~/.claude/settings.json still contains every key it had before.
 
 5. List any hook or statusLine entry in settings.json whose command path does not exist
    here — in particular anything pointing at a macOS home directory on a non-macOS
@@ -92,4 +91,34 @@ git pull && node bootstrap.mjs install
 
 `node bootstrap.mjs status` shows drift at any time. Locally edited files are skipped
 rather than clobbered, so a machine-specific tweak survives until you resolve it with
-`--force`.
+`--force`. `status` compares file hashes and nothing more — run `node bootstrap.mjs doctor`
+to check that the install actually works on this machine.
+
+## Hard version enforcement (optional, requires root — not installed)
+
+This setup depends on Claude Code features with version floors, recorded in
+`user/version-floor.json`. Below the floor they fail silently: worker nesting is
+uncapped, the concurrency cap is ignored, and `opus` resolves to a model generation behind.
+
+`minimumVersion` in user settings — which `bootstrap.mjs` installs — stops an *update* from
+going below the floor. It does not stop an already-old install from running. To make Claude
+Code refuse to start below the floor, an administrator adds `requiredMinimumVersion` to
+managed settings:
+
+| Platform  | Managed settings file |
+| --------- | --------------------- |
+| macOS     | `/Library/Application Support/ClaudeCode/managed-settings.json` |
+| Linux/WSL | `/etc/claude-code/managed-settings.json` |
+| Windows   | `C:\Program Files\ClaudeCode\managed-settings.json` |
+
+```json
+{ "requiredMinimumVersion": "2.1.219" }
+```
+
+Managed settings override every other scope and cannot be relaxed per project. The setting
+fails open on a malformed value — an invalid entry is stripped rather than enforced, so a
+bad policy push cannot stop Claude Code from starting — and `claude update`, `claude
+install`, and `claude doctor` keep working below the floor so a machine can recover.
+
+`bootstrap.mjs` does not write this file. It needs root, it affects every user on the
+machine, and it is a policy decision rather than an install step.

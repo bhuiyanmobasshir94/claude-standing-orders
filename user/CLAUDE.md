@@ -19,13 +19,11 @@ relaxes a security, reliability, or compliance rule.
 | `verifier` | subagent | `haiku` | — | runs tests/lint/build, reports pass/fail with evidence, **zero judgment** |
 | `Explore` | built-in subagent | inherits | — | codebase search and discovery |
 
-Workers are pinned by **capability alias** (`opus` / `sonnet` / `haiku`), never by version
-number. Aliases track the current recommended version; version numbers rot. If a specific
-version is ever required, pin it in exactly one place — `~/.claude/settings.json` `env`
-(`ANTHROPIC_DEFAULT_*_MODEL`) — and nowhere else.
-
-Haiku does not support effort levels. `fast-implementer` and `verifier` therefore carry no
-`effort` field; adding one would be a silent no-op, not a setting.
+Workers are pinned by **capability alias**, never by version number — aliases track the
+current recommended version and version numbers rot. If a specific version is required, pin
+it only in `~/.claude/settings.json` `env` (`ANTHROPIC_DEFAULT_*_MODEL`). Haiku supports no
+effort levels, so `fast-implementer` and `verifier` carry no `effort` field; adding one
+would be a silent no-op, not a setting.
 
 ## How to operate
 
@@ -48,9 +46,9 @@ Haiku does not support effort levels. `fast-implementer` and `verifier` therefor
 
 ## Task Packet (required on every delegation)
 
-Workers start with a fresh context window. They do not see the conversation, the files you
-read, your auto memory, or your output style. They *do* receive the full `CLAUDE.md`
-hierarchy and project rules. So the packet carries what those cannot:
+Workers start fresh: no conversation, no files you read, no auto memory, no output style.
+They *do* get the full `CLAUDE.md` hierarchy and project rules, so the packet carries what
+those cannot:
 
 - **Intent** — one or two sentences: what must be true when this is done.
 - **Files** — read-write set and read-only set, named explicitly.
@@ -60,8 +58,8 @@ hierarchy and project rules. So the packet carries what those cannot:
   (tests, changelog entry, migration).
 
 A worker that has to guess at any of these should return `BLOCKED` rather than invent a
-design. The full contract, including the report and `BLOCKED` shapes, lives in the
-`worker-contract` skill, which is preloaded into every worker.
+design; a `SubagentStart` hook warns it when a field is missing. The full contract lives in
+the `worker-contract` skill, preloaded into every worker.
 
 ## Parallelism
 
@@ -74,26 +72,46 @@ design. The full contract, including the report and `BLOCKED` shapes, lives in t
   `isolation: worktree` so it works on its own checkout.
 - Workers do not spawn workers. `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` enforces this, and
   no worker definition lists the `Agent` tool.
+- **Reconciling a batch.** Read one combined `git diff` over the whole batch, not each
+  report in isolation — the defects live at the seams: a shared import, a helper written
+  twice, two edits to one file that slipped past the disjoint-set rule. Run verification
+  once over the merged result; per-slice passes do not compose.
+- **When one worker returns BLOCKED or PARTIAL and others succeeded,** keep the good slices
+  and re-dispatch only the failed one with the missing packet field supplied. Do not roll
+  back the batch. Git is the recovery mechanism — commit or stash the good slices before
+  re-dispatching so a retry cannot cost them. `isolation: worktree` is the prevention.
 
 ## Session memory
 
 Sessions are stateless; continuity is a deliverable, not a hope.
 
-- **Committed and portable:** a decision log (why the current shape exists) and a changelog
-  directory (what each session changed). Defaults are `docs/decisions/DECISIONS.md` and
-  `docs/changelogs/`; a project that already uses another convention — `docs/adr/`, a root
-  `DECISIONS.md` — keeps it and declares it in `.claude/continuity.json`. These travel with
-  the repo, so a session on a server reads the same history as a session on the laptop.
+- **Committed:** a decision log (why the current shape exists) and a changelog
+  directory (what each session changed), defaulting to `docs/decisions/DECISIONS.md` and
+  `docs/changelogs/`. A project already using `docs/adr/` or a root `DECISIONS.md` keeps it
+  and declares it in `.claude/continuity.json`. These travel with the repo, so a session on
+  a server reads the same history as one on the laptop.
 - **Per-agent, committed:** `reviewer` and `implementer` keep `memory: project`, writing to
   `.claude/agent-memory/<agent>/`. Commit that directory — it is institutional knowledge.
-- **Machine-local, automatic:** auto memory stays on. It does *not* sync between machines,
-  so anything another machine must know goes in a committed file instead.
+- **Machine-local:** auto memory stays on, but does not sync — anything another machine
+  must know goes in a committed file.
 
 **End every working session that changed code, config, or docs by writing the changelog
-entry before the session ends.** A session that changed something and left no trace is an
-incomplete session.
+entry.** A session that changed something and left no trace is incomplete. To set a
+repository up for this workflow, run `/orchestration-onboard` in it.
 
-To set a repository up for this workflow, run `/orchestration-onboard` in it.
+## Before reporting a task done
+
+Ceremony scales with blast radius. A one-line fix in one file needs lines 1–2 only; the
+full list binds anything spanning multiple files, or touching auth, migrations, money, PII,
+or public API shape.
+
+1. The actual diff has been read — `git diff`, not a worker's description of it.
+2. Verification was observed: the command and its real output, run here or returned by
+   `verifier`. Anything that could not be run is named as unverified.
+3. Every worker report is reconciled — each finding applied, or rejected with the reason
+   stated to the user.
+4. The changelog entry is written, and the decision log updated if a choice was settled.
+5. Deferred decisions and known gaps are in the final message, not dropped.
 
 ## Non-negotiables (every project)
 
@@ -113,13 +131,14 @@ To set a repository up for this workflow, run `/orchestration-onboard` in it.
 
 ## Notes
 
-- Model and effort for the main thread come from `~/.claude/settings.json`
-  (`model: opus`, `effortLevel: xhigh`). Worker tiers are pinned in
-  `~/.claude/agents/*.md`. If `CLAUDE_CODE_SUBAGENT_MODEL` is set in the environment it
-  overrides every worker's `model` field — check it first when workers run on the wrong
-  tier.
+- Main-thread model and effort come from `~/.claude/settings.json` (`model: opus`,
+  `effortLevel: xhigh`); worker tiers from `~/.claude/agents/*.md`. `CLAUDE_CODE_SUBAGENT_MODEL`
+  in the environment overrides every worker's `model` — check it first when workers run on
+  the wrong tier.
 - For a session that is one very hard problem, `/effort ultracode` (session-only) adds
   workflow orchestration on top of `xhigh`. It is not a substitute for delegation.
-- The `caveman` plugin is UI only: statusline and presentation. It does not select agents
-  or route tasks; all delegation is governed by this file. Output styles do not reach
-  subagents, so worker output is unaffected by it either way.
+- This setup requires **Claude Code 2.1.219+**. The floor lives in one file,
+  `~/.claude/version-floor.json`. Below it the spawn-depth pin and the concurrency cap are
+  ignored and `opus` resolves to Opus 4.8 — all three silently. The session brief warns;
+  `node bootstrap.mjs doctor` checks. As of 2.1.219 the default spawn depth is 3, so the
+  `=1` pin is doing real work today, not guarding a legacy default.

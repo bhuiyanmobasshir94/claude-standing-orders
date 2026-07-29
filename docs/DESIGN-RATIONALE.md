@@ -201,7 +201,12 @@ Result: 113 lines, with the standards intact and loading when they are relevant.
 
 ## 6. Verification performed on this package
 
-- All three `.mjs` files pass `node --check`.
+This section records the verification performed when the package was first assembled. The
+hardening round in §8 was verified separately; see §8.6.
+
+- All `.mjs` files pass `node --check`, invoked once per file. `node --check` takes a single
+  file and silently ignores every argument after the first, so a single invocation listing
+  several files reports success even when the later ones are broken.
 - `bootstrap.mjs` was run against a temp home seeded with a representative `settings.json`;
   the merge preserved `enabledPlugins`, `extraKnownMarketplaces`, `statusLine`, and existing
   hook entries while adding the new keys and hook entries. Output re-parsed as valid JSON.
@@ -211,7 +216,7 @@ Result: 113 lines, with the standards intact and loading when they are relevant.
   documented schema: no unknown fields, valid model aliases, valid effort values, `effort`
   present only on effort-capable models, no worker holding the `Agent` tool, and every
   preloaded skill resolving to a real file.
-- Both hooks were exercised against a realistic repo layout, and against malformed JSON,
+- The hooks were exercised against a realistic repo layout, and against malformed JSON,
   empty stdin, and a bare directory with no continuity files — all exit 0 without output.
 - Continuity discovery was tested against four repository shapes: a `docs/adr/` directory,
   a root `DECISIONS.md` with undated changelog filenames, an explicit
@@ -220,9 +225,222 @@ Result: 113 lines, with the standards intact and loading when they are relevant.
 
 ## 7. Version floors
 
-Opus 5 requires Claude Code **v2.1.219+**. The subagent spawn-depth and concurrency limits
-require v2.1.217+, subagent output scanning v2.1.210+, and background-by-default subagents
-v2.1.198+. Run `claude update` on every machine before installing, then `claude --version`
-to confirm. On Amazon Bedrock or Vertex the `opus` and `sonnet` aliases resolve to older
-versions than on the Anthropic API — pin `ANTHROPIC_DEFAULT_OPUS_MODEL` and
-`ANTHROPIC_DEFAULT_SONNET_MODEL` in that machine's settings `env` when deploying there.
+The floor is **not stated here**. It lives in `user/version-floor.json`, and this section
+describes only why that file exists. A number repeated in prose is a number that goes stale
+in prose; §1.3 makes that argument for model versions, and it applies with more force to a
+floor that three separate mechanisms have to agree on.
+
+Everything that needs the floor reads it from that one file: `bootstrap.mjs` substitutes it
+into `settings.template.json` as `minimumVersion` (via `__MIN_VERSION__`, the same mechanism
+as `__CLAUDE_HOME__`), `session-brief.mjs` warns against it at session start, and
+`bootstrap.mjs doctor` checks the running version against it.
+
+On Amazon Bedrock or Vertex the `opus` and `sonnet` aliases resolve to older versions than
+on the Anthropic API — pin `ANTHROPIC_DEFAULT_OPUS_MODEL` and `ANTHROPIC_DEFAULT_SONNET_MODEL`
+in that machine's settings `env` when deploying there.
+
+## 8. Hardening round: the floor was unenforced, and the ledger was empty
+
+Two things this package shipped were defects rather than missing features. Both had the same
+shape: a mechanism that appeared to work, produced no error, and delivered nothing.
+
+### 8.1 The version floor was documented but never enforced (defect)
+
+§7 previously stated the floors in prose and told the operator to run `claude --version`
+before installing. Nothing checked. On an install below the floor, three things failed
+silently and simultaneously:
+
+- `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` is ignored before v2.1.217, so workers could spawn
+  workers up to **five layers deep** — while `user/CLAUDE.md` stated as fact that they
+  could not.
+- `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` is ignored before v2.1.217, so the cap of 6 was
+  really 20.
+- `model: opus` resolved to Opus 4.8 before v2.1.219, so the orchestrator ran a generation
+  behind the design that assumes it out-reasons its workers.
+
+No error, no symptom, no way to notice. The claim that this setup behaves identically on
+every machine was false wherever the floor was not met.
+
+A detail found while verifying this, which inverts the usual argument for the spawn-depth
+pin: the **default changed**. On v2.1.172–2.1.216 nesting was allowed up to five layers and
+could not be configured; v2.1.217–2.1.218 defaulted to 1; **v2.1.219 raised the default to
+3**. So `=1` is not belt-and-braces over a safe default — on any current install it is the
+only thing preventing three layers of nesting.
+
+**What was added.** `minimumVersion` in user settings, which is real but narrower than it
+sounds: per the Claude Code documentation it makes auto-updates and `claude update` refuse
+to install *below* the floor. It does not stop an already-old install from running, so it
+alone does not close the gap. The actual guard is a check in the existing `SessionStart`
+hook, which names which features are inactive rather than only printing a number. It warns
+and never blocks: this is an observability surface, and a session that cannot start because
+its diagnostics failed is a worse outcome than a session that runs with a visible warning.
+
+`requiredMinimumVersion` — the managed setting that *does* refuse to start — is documented
+in `INSTALL.md` and deliberately not installed. It requires root, applies to every user on
+the machine, and is a policy decision rather than an install step.
+
+**Cost.** The hook derives the version from `CLAUDE_CODE_EXECPATH` and never spawns a
+process. `claude --version` was measured at 0.26–1.51s, which is not acceptable on a
+session-start path; `doctor` pays that cost instead, because the operator ran it on purpose.
+When the version cannot be determined the hook stays silent rather than guessing.
+
+### 8.2 The worker ledger recorded nothing (defect)
+
+`worker-ledger.mjs` read `payload.last_message`. The documented `SubagentStop` field is
+`last_assistant_message`. That key never existed, so `extractResult` returned `null` on
+every worker that ever completed, and every row the ledger had ever written carried
+`"result": null`. The file grew, the session brief echoed it back, and it contained no
+information at all.
+
+This is the failure mode the package is otherwise built to prevent: a mechanism that reports
+success while delivering nothing. It survived because nothing read the ledger for meaning —
+the raw tail looked plausible with `unknown` in place of a result.
+
+The fix is the correct key. The safeguard is that the rollup replacing the raw tail now
+reports its own silence: if every row in the window carries no result, the brief says so and
+points at `doctor`, rather than rendering an empty tally as if it were a clean run.
+
+The rollup supports exactly one inference — *this role keeps returning BLOCKED* — and the
+code says so. It does not know why, and the ledger is too sparse to support more.
+
+### 8.3 `status` claimed more than it verified
+
+`status` compared file hashes and printed "In sync with this repo," which reads as "this
+machine works." It verified nothing about whether the install functions. `status` is
+unchanged but now says what it does not cover; `doctor` answers the real question across
+seven checks and exits non-zero so it can be used in a script.
+
+The check that hook paths resolve deliberately **fails** when `settings.json` cannot be
+read, rather than passing with nothing to inspect. A check with no data is unknown, and
+unknown is not a pass. It covers `statusLine` alongside `hooks`, because an absolute script
+path written on a laptop is the most common way a config breaks on a server, and whether
+this package wrote that path is irrelevant to whether it resolves.
+
+The drift check separates two things `status` conflated. A file that differs because the
+repo moved ahead is **stale** and fails. A file the operator deliberately edited is a
+**choice** — `install` already refuses to clobber it — and is reported as kept rather than
+failed. The manifest tells them apart: it records what was last written, so an installed
+file that no longer matches the manifest was edited locally. Reporting a deliberate local
+edit as a failure would only teach the reader to ignore the command, which costs more than
+the check is worth.
+
+### 8.3.1 The merge is additive, which makes removing a setting a separate problem
+
+Dropping `fallbackModel` from `settings.template.json` removes it for a fresh install and
+leaves it in place on every machine that already has it. The merge adds and overrides; it
+never deletes. So a decision to retire a setting does not reach any existing machine —
+precisely the silent divergence between machines this package exists to prevent, reappearing
+in the installer itself.
+
+Retired keys are now named in a `DEPRECATED_KEYS` list in `bootstrap.mjs`, with the reason
+attached. Removal is printed on install and the previous `settings.json` is backed up first.
+A key belongs on that list only when its removal is a deliberate decision — never to tidy
+someone's settings.
+
+**Known limitation.** A file the operator has locally extended can never receive package
+updates: `install` skips it, and `--force` would discard the local content. There is no
+merge path for "keep my addition, take the new upstream text." Extending an installed
+`CLAUDE.md` with an `@import` line is enough to trigger this. The workaround is to make the
+edit in a file the package does not own and import it, rather than editing the installed
+file in place.
+
+### 8.4 Settings judged, including one kept against the proposal
+
+- **`fallbackModel` removed.** When Opus was overloaded it silently moved the orchestrator
+  to a worker tier. The whole design rests on the orchestrator out-reasoning its workers, so
+  an invisible demotion is worse than a visible failure. The chain also covers compaction,
+  which means a downgraded summarizer too.
+- **`autoUpdatesChannel: "stable"` added.** A setup whose value is behaving identically
+  everywhere should not take every release including regressions. `minimumVersion` is what
+  stops the switch from downgrading a machine already ahead of stable.
+- **`alwaysThinkingEnabled` kept**, against the proposal to remove it as redundant beside
+  `effortLevel: xhigh`. The documentation is explicit that on adaptive-reasoning models the
+  effort level controls *how much* thinking happens while this setting controls *whether* it
+  is on. Different controls; not redundant.
+- **`includeGitInstructions` left at its default.** Disabling it removes the git status
+  snapshot as well as the commit/PR instructions, and the orchestrator's integration
+  checklist opens with "read the actual diff." Removing the input to your own gate to save a
+  few hundred tokens is a bad trade.
+- **A user-level `ask` baseline for destructive commands added**, kept to four rules.
+  Permission rules merge across every scope and project, so this list stays short. It is a
+  net over broad project-level `allow` rules — an `ask` rule prompts even when a more
+  specific `allow` matches — not a security boundary. Its coverage is literal: `rm -rf` and
+  `rm -fr` are matched, `rm -r -f` is not.
+
+### 8.5 Two mechanisms whose limits are the point
+
+**Task Packet check (`packet-check.mjs`).** The packet's fields are mechanically checkable
+at dispatch, and `SubagentStart` exposes `prompt_text`. It cannot block — the event does not
+permit it — which turned out to be the right shape anyway: `additionalContext` on
+`SubagentStart` reaches the *subagent*, so the warning lands where it converts "invent a
+design" into "return BLOCKED naming the missing field." It is scoped to `implementer`,
+`fast-implementer`, and `reviewer`; `verifier` is exempt because its packet is a command
+list. It says in its own text that it is a warning, not a gate, so a legitimately trivial
+delegation is not punished for brevity.
+
+**Compaction snapshot (`compact-state.mjs`).** `PreCompact` receives `transcript_path`, so a
+hook can capture real state rather than a stub. It records what is deterministic: every
+worker dispatched with the outcome it reported, and every file written. It explicitly cannot
+capture what was reconciled, accepted, rejected, or decided — that is orchestrator reasoning
+and no hook recovers it from a transcript. The snapshot says this in its own text so a
+post-compaction session does not mistake it for a full handoff.
+
+It writes to the OS temp directory rather than the repository: nothing to `.gitignore`, no
+cleanup discipline, and no session residue committed by accident.
+
+### 8.6 Verification performed on this round
+
+- `node --check` passes on `bootstrap.mjs` and all four hooks, invoked once per file.
+- Every tracked `.json` parses, including `settings.template.json` after both
+  `__CLAUDE_HOME__` and `__MIN_VERSION__` substitution.
+- All 13 markdown files with frontmatter were checked field-by-field against the documented
+  schemas: no unknown fields, and no `effort` on an effort-incapable model. The first run of
+  this check reported nine failures that were false — `paths`, `argument-hint`, and
+  `user-invocable` are all documented fields the checker's allowlist was missing. The
+  checker was corrected against the documentation rather than the files.
+- `grep -riE "django|celery|IBBL|banking" user/ project-template/` returns nothing.
+- Each hook was exercised against real input, malformed JSON, empty stdin, and a repository
+  missing the files it looks for. Every path exits 0. `compact-state.mjs` was run against a
+  **real session transcript** — not a synthetic one — and produced a snapshot naming three
+  dispatched workers with their reported outcomes and three files written. The
+  `PreCompact` → `SessionStart` handoff was exercised end to end, and a snapshot older than
+  the cutoff was confirmed to be ignored.
+- The transcript shapes the parser depends on (`Agent` tool_use carrying
+  `input.subagent_type` and `input.description`; `tool_result` carrying `tool_use_id` and a
+  string `content`; `Edit`/`Write` carrying `input.file_path`) were read out of a real
+  transcript rather than assumed.
+- The ledger fix was confirmed by payload: a `SubagentStop` payload carrying
+  `last_assistant_message` now records `"result":"DONE"` and `"result":"BLOCKED"` with the
+  blocker note, where the previous key produced `null` every time.
+- `bootstrap.mjs install --home=/tmp/probe` then `status` then `doctor`: 14 files written,
+  all in sync, 7 of 7 checks pass, exit 0.
+- `doctor` was then run against a **deliberately broken** copy: a deleted file, a tampered
+  file, a hook path that does not resolve, `effort: xhigh` added to a `model: haiku` agent,
+  and an agent naming a skill that is not installed. It detected all five and exited 1. With
+  an unparsable `settings.json` it reports 6 of 7 failed and exits 1.
+- Startup cost was **measured**, not estimated: the old and new `session-brief.mjs` were run
+  against the same payload in the same repository, interleaved, twelve iterations each,
+  median of medians. The version check and handoff lookup add **+1.2 ms** on top of a hook
+  whose total is ~27 ms, nearly all of which is the Node process spawn that was already
+  being paid. The other two hooks do not run at session start: `packet-check.mjs` fires per
+  dispatch and `compact-state.mjs` only when compaction runs.
+- `doctor`'s drift classification was exercised in all three directions: a file the repo
+  moved ahead of fails, a missing file fails, and a locally edited file passes and is
+  reported as kept.
+- Deprecated-key removal was exercised against a seeded `settings.json`: `fallbackModel` was
+  removed while `statusLine`, `enabledPlugins`, and an unrelated `PreToolUse` hook entry
+  were all preserved, and a second run reported the settings already current.
+- The compaction snapshot's project isolation was exercised with two project roots sharing
+  one temp directory: the writing project read its own snapshot back, the other read
+  nothing. The file is written mode `0600`.
+- Permission rule syntax was checked against the documentation: the space-glob form
+  (`Bash(rm -rf *)`) is the documented shape, `ask` takes precedence over a more specific
+  `allow`, and ask rules match past a leading environment-variable assignment. The rules
+  themselves were **not** exercised against a live prompt, because doing so requires an
+  interactive approval dialog. That claim is verified by documentation, not by execution.
+
+**A `reviewer` pass was dispatched on this diff and did not complete** — it terminated on a
+session limit before returning findings. The review recorded here was performed by the
+orchestrator directly against `git diff`. Nothing in this round carries an independent
+review, and the defects listed in §8.3.1 and the handoff isolation fix were found by that
+self-review rather than by a second pair of eyes.

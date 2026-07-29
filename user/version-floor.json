@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "The single source of truth for this setup's Claude Code version floor.",
+    "bootstrap.mjs substitutes minimumVersion into settings.template.json at install time;",
+    "session-brief.mjs reads this file to warn when the running version is below it;",
+    "bootstrap.mjs doctor checks the running version against it.",
+    "Each feature row is [version, name, what breaks silently below it]."
+  ],
+  "minimumVersion": "2.1.219",
+  "features": [
+    ["2.1.217", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
+     "ignored - workers can spawn workers, up to five layers deep"],
+    ["2.1.217", "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",
+     "ignored - up to 20 workers run at once"],
+    ["2.1.219", "model: opus resolves to Opus 5",
+     "the orchestrator runs Opus 4.8, one generation behind its own design"]
+  ]
+}

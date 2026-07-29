@@ -42,7 +42,17 @@ function projectRoot(payload) {
  * same ledger, so both must parse.
  */
 function extractResult(payload) {
-  const candidates = [payload.last_message, payload.output, payload.result, payload.reason];
+  // `last_assistant_message` is the documented SubagentStop field. An earlier version read
+  // `last_message`, which never exists, so every row ever written recorded result:null —
+  // the ledger looked healthy and carried no signal at all. The others are kept as
+  // tolerated fallbacks, not as the expected shape.
+  const candidates = [
+    payload.last_assistant_message,
+    payload.last_message,
+    payload.output,
+    payload.result,
+    payload.reason,
+  ];
   for (const c of candidates) {
     if (typeof c !== "string") continue;
     const m = c.match(/^##\s*Result\s*\r?\n+\s*(DONE|PARTIAL|BLOCKED|PASS|FAIL)\b/im);
@@ -52,7 +62,7 @@ function extractResult(payload) {
 }
 
 function extractNote(payload) {
-  const c = payload.last_message;
+  const c = payload.last_assistant_message || payload.last_message;
   if (typeof c !== "string") return null;
   const m = c.match(/^##\s*Blocker\s*\r?\n+([^\n]+)/im);
   if (!m) return null;
