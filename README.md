@@ -64,6 +64,8 @@ docs/DESIGN-RATIONALE.md       why the package is built the way it is
 .gitignore                     project settings, ledger, worktrees, agent memory stay local
 INSTALL.md                     prompts to paste into Claude Code
 bootstrap.mjs                  cross-platform installer
+verify-repo.mjs                structural invariants for this repo; exits 1 on failure
+LICENSE                        MIT
 ```
 
 ## Why it is built this way
@@ -150,3 +152,7 @@ Without the key the hook does nothing, in every project. That is deliberate: a r
 that guesses which command counts as verification would fire on projects that verified
 correctly, and a nag you learn to ignore is worse than no nag. `/orchestration-onboard`
 fills this in for you.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
