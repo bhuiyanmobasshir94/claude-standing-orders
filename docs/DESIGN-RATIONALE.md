@@ -519,3 +519,134 @@ fallback that never fires reads as verified behavior to the next maintainer.
 working tree before being accepted. The review also wrote agent-memory files into
 `.claude/agent-memory/reviewer/`, which this repository's `CLAUDE.md` explicitly forbids —
 those were removed. A worker's report is not exempt from the project's own rules.
+
+## 9. Task shape, test quality, and a reminder that is not a gate
+
+This round evaluated six proposals about how agent-written code actually gets run. Three
+were adopted as proposed, three modified, and three rejected. The rejections matter as much
+as the adoptions: two of them were rejected specifically because a mechanism for the same
+job already exists, and a second mechanism for one job makes a system worse.
+
+### 9.1 Non-goals: `Constraints` was never doing this work
+
+`Constraints` is defined in both the packet and the contract as *invariants* — "what must
+not change; which project rules bind this slice." Scope is a different question, and it was
+handled only by negative prose inside the worker ("do not expand scope", "stay inside your
+read-write set"). That leaves a real gap: the read-write set cannot stop creep *within* a
+file it grants. A worker told to fix a bug in `export.py` can refactor the function next to
+it without ever leaving its scope.
+
+`Non-goals` is therefore a packet field, not another worker instruction — the orchestrator
+is the one who saw the adjacent work and decided not to do it, so it is the one who has to
+say so.
+
+**It is the only optional field, and it is deliberately absent from `packet-check.mjs`.** A
+sixth required field would make that hook warn on nearly every legitimate dispatch, and a
+warning that always fires is one you stop reading. §8.5 made this argument for gates; it
+applies to warnings with equal force. The contract states explicitly that a missing
+`Non-goals` is never grounds for `BLOCKED`.
+
+`Done means` gained "what their output must show" for a related reason: a command is not a
+criterion. "Run `make test`" is satisfied by running it; "run `make test`, and the three new
+cases in `test_export.py` pass" is not.
+
+### 9.2 Verification: the signal problem, solved by not guessing
+
+"Verify before claiming" is the assumption everything else rests on, and it was pure prose.
+The obvious mechanisation — a `Stop` hook that checks whether verification ran — founders on
+one question: *which command counts as verification here?* Every heuristic answer (match
+`test`, match `lint`, match a shell fragment) produces false negatives on the projects that
+verify in unusual ways, and a gate that blocks a session which **did** verify gets switched
+off within a week. Switching it off also removes the reminder, so a false-positive-prone
+gate is strictly worse than no gate at all.
+
+So the hook does not guess. Projects declare their commands in `.claude/continuity.json`,
+the file `session-brief.mjs` already reads:
+
+```json
+{ "verifyCommands": ["make test", "make lint"] }
+```
+
+**Without that key the hook exits silently and is completely inert.** That makes the
+false-positive rate zero by construction rather than by tuning, and makes the mechanism
+opt-in per project — a repository that never adds the key keeps exactly today's behavior.
+
+It reminds; it never blocks. `decision: block` appears nowhere in it. It fires at most once
+per session, stays silent when a declared command ran, when a `verifier` was dispatched, and
+when nothing but docs changed.
+
+**`Stop` fires on every assistant turn, not once at the end** — a fact worth stating because
+it is easy to assume otherwise and expensive to get wrong. The hook therefore scans the
+transcript incrementally from a saved byte offset, and skips rewriting its marker on a turn
+that changed nothing. Measured: **+9.1 ms per turn** in an opted-in project against a 35 ms
+bare-Node-spawn floor, and indistinguishable from that floor in a project without the key.
+Before the write-skip it was +28 ms.
+
+### 9.3 Tests: the question coverage cannot ask
+
+Agent-written tests fail in a particular way — they pass whether or not the implementation
+is right. Mocking the unit under test, asserting only that nothing raised, snapshotting
+current behavior as intended behavior. Coverage reports all of these as covered.
+
+The reviewer now asks the one question that discriminates: *if the implementation were
+subtly wrong, would this test fail?* It costs nothing at runtime and applies only when the
+diff touches tests.
+
+**The mutation-testing gate was rejected.** Tool names are per-ecosystem, so it cannot live
+in `project-template/` without breaking the stack-agnostic rule — it belongs in `examples/`
+if anywhere. And a gate slow enough that its own advocates scope it to changed files is a
+gate that gets skipped under deadline. The reviewer instruction captures most of the value
+at none of the cost.
+
+### 9.4 What was rejected, and why the rejections are the point
+
+**Per-task state files (`.claude/tasks/<id>.md`) — rejected.** The changelog already covers
+finished work and is read back at the next session start; `compact-state.mjs` already covers
+in-flight state across a compaction; git covers the files themselves. What remains is a hard
+crash mid-task with uncommitted work — rare, largely recoverable, and not worth a convention
+that must be current on every turn to be trustworthy. It also cannot be scoped down: "only
+for non-trivial tasks" makes it optional, and an optional file that must be current to be
+trusted is one that is silently stale. This package argues for fewer continuity artifacts
+that are always true, not more that are sometimes true.
+
+**A separate orchestration failure log — rejected.** The worker ledger and its session-brief
+rollup already *are* that mechanism. Its real weakness is that it is gitignored, so the
+signal never leaves the machine that produced it. Two lines extending the decision log fix
+that for free: the ledger shows the pattern, the decision log is where the conclusion
+survives. A second log would have been a duplicate mechanism for a job already assigned.
+
+### 9.5 AGENTS.md: import, never duplicate
+
+Claude Code reads `CLAUDE.md` and not `AGENTS.md`. A repository that already has an
+`AGENTS.md` therefore gets a `CLAUDE.md` whose first line is `@AGENTS.md`, with only
+Claude-specific additions below it. One file stays authoritative. Maintaining the same
+content in both is the failure this avoids, and it is a more likely failure than the one it
+solves.
+
+### 9.6 Verification performed on this round
+
+- `node --check` passes on `bootstrap.mjs` and all five hooks, one invocation per file.
+- Every tracked `.json` parses, including `settings.template.json` after both substitutions;
+  the template now declares five hook events.
+- All 13 markdown files with frontmatter parse with no unknown fields and no `effort` on an
+  effort-incapable model.
+- `grep -riE "django|celery|IBBL|banking" user/ project-template/` returns nothing.
+- `verify-reminder.mjs` exercised against: a project with no `verifyCommands` (inert), code
+  edited with nothing verified (reminder, 391 bytes), the same session twice (once only), a
+  declared command having run (silent), a `verifier` dispatch (silent), a docs-only change
+  (silent), malformed JSON, empty stdin, a missing transcript, a missing `transcript_path`
+  field, a repository with none of the expected files, and a transcript of junk lines.
+  **Every path exits 0.**
+- Incremental scanning verified directly: a transcript whose edit appears only in a later
+  turn produces no reminder on the first turn (offset advanced to 92 bytes), the reminder on
+  the turn the edit lands, and silence thereafter.
+- `bootstrap.mjs install --home=/tmp/probe`, then `status`, then `doctor`: 15 files written,
+  in sync, 8 of 8 checks pass, exit 0.
+
+One test-harness failure is worth recording, because it nearly produced a false pass: the
+first run of the hook suite built its fixtures with `node -e` and read `process.argv[3]`,
+which is undefined — with `-e` there is no script path in `argv`, so positionals start at
+`argv[1]`. No transcripts were created and every case tested a missing file, so all twelve
+reported a clean exit 0. The tell was the one case that should have produced a reminder
+returning zero bytes. An all-pass result whose passes all have the same cause deserves the
+same suspicion as an all-fail one.

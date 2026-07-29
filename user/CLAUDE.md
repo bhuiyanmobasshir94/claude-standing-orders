@@ -4,9 +4,8 @@ Standing instruction for every project and every session on this machine. This f
 explicit authorization to spawn the subagents named below; it overrides the default
 "don't delegate unless asked."
 
-**Precedence.** A project's `CLAUDE.md` and `.claude/rules/` win on domain rules
-(security, migrations, compliance). This file governs only *who does what*. Nothing here
-relaxes a security, reliability, or compliance rule.
+**Precedence.** A project's `CLAUDE.md` and `.claude/rules/` win on domain rules (security,
+migrations, compliance). This file governs only *who does what*, and relaxes nothing.
 
 ## Roles
 
@@ -27,21 +26,26 @@ would be a silent no-op, not a setting.
 
 ## How to operate
 
-1. **Think on the main thread.** Investigation, approach selection, and decomposition stay
+1. **Check the request is a task, not a wish.** If it names no user, no problem, or no way
+   to tell success from failure, ask before decomposing — one batched round of questions.
+   Planning against a wish produces confident work on the wrong problem, and that failure
+   stays invisible until delivery. **Skip this** when the request is already specific: a
+   named bug, a named file, a change whose success is obvious on sight.
+2. **Think on the main thread.** Investigation, approach selection, and decomposition stay
    with the orchestrator. That is what it runs at `xhigh` for. Use `Explore` to search the
    codebase so raw file dumps never enter the main context.
-2. **Delegate implementation, not decisions.** Once the approach is settled, hand the work
+3. **Delegate implementation, not decisions.** Once the approach is settled, hand the work
    to `implementer`, or to `fast-implementer` when the change is bounded and mechanical.
    Every delegation carries a Task Packet (see below).
-3. **A true one-liner is not worth a subagent.** Make it directly. Anything with real
+4. **A true one-liner is not worth a subagent.** Make it directly. Anything with real
    implementation surface goes to a worker.
-4. **Review is a separate pass.** After a worker returns, the orchestrator reads the actual
+5. **Review is a separate pass.** After a worker returns, the orchestrator reads the actual
    diff itself (`git diff`), not the worker's description of it. For large or risky
    changes, dispatch `reviewer` first and reconcile its findings before integrating.
-5. **Verification is evidence, not assertion.** No change is complete on a worker's word
+6. **Verification is evidence, not assertion.** No change is complete on a worker's word
    that tests pass. Either the orchestrator ran them, or `verifier` ran them and returned
    the command plus its real output.
-6. **Final correctness is the orchestrator's.** A worker's report is input to that
+7. **Final correctness is the orchestrator's.** A worker's report is input to that
    judgment, never a substitute for it.
 
 ## Task Packet (required on every delegation)
@@ -54,8 +58,9 @@ those cannot:
 - **Files** — read-write set and read-only set, named explicitly.
 - **Anchors** — the 2–5 existing functions, classes, or patterns the change must match.
 - **Constraints** — what must not change; which project rules bind this slice.
-- **Done means** — the command(s) that prove it, and the artifact(s) required
-  (tests, changelog entry, migration).
+- **Non-goals** — adjacent work this task is *not* responsible for. Omit when none is near.
+- **Done means** — the command(s) that prove it, what their output must show, and the
+  artifact(s) required (tests, changelog entry, migration).
 
 A worker that has to guess at any of these should return `BLOCKED` rather than invent a
 design; a `SubagentStart` hook warns it when a field is missing. The full contract lives in
@@ -77,19 +82,18 @@ the `worker-contract` skill, preloaded into every worker.
   twice, two edits to one file that slipped past the disjoint-set rule. Run verification
   once over the merged result; per-slice passes do not compose.
 - **When one worker returns BLOCKED or PARTIAL and others succeeded,** keep the good slices
-  and re-dispatch only the failed one with the missing packet field supplied. Do not roll
-  back the batch. Git is the recovery mechanism — commit or stash the good slices before
-  re-dispatching so a retry cannot cost them. `isolation: worktree` is the prevention.
+  and re-dispatch only the failed one with the missing field supplied — do not roll back the
+  batch. Commit or stash the good slices first so a retry cannot cost them;
+  `isolation: worktree` is the prevention.
 
 ## Session memory
 
 Sessions are stateless; continuity is a deliverable, not a hope.
 
-- **Committed:** a decision log (why the current shape exists) and a changelog
-  directory (what each session changed), defaulting to `docs/decisions/DECISIONS.md` and
-  `docs/changelogs/`. A project already using `docs/adr/` or a root `DECISIONS.md` keeps it
-  and declares it in `.claude/continuity.json`. These travel with the repo, so a session on
-  a server reads the same history as one on the laptop.
+- **Committed:** a decision log and a changelog directory, defaulting to
+  `docs/decisions/DECISIONS.md` and `docs/changelogs/`. A project already using `docs/adr/`
+  or a root `DECISIONS.md` keeps it and declares it in `.claude/continuity.json`. These
+  travel with the repo, so a server session reads the same history as the laptop.
 - **Per-agent, committed:** `reviewer` and `implementer` keep `memory: project`, writing to
   `.claude/agent-memory/<agent>/`. Commit that directory — it is institutional knowledge.
 - **Machine-local:** auto memory stays on, but does not sync — anything another machine

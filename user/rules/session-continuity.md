@@ -19,6 +19,10 @@ Cover, with concrete detail:
 - **How** — the approach taken, notable decisions, and any tradeoff made.
 - **Affected modules and behaviors** — including downstream effects on auth, migrations,
   async tasks, webhooks, and analytics.
+- **Intended outcome** — one line: what this change was supposed to make true, and what
+  signal would show it did or did not. Skip it for changes with no behavioral goal — a
+  refactor, a typo fix, a docs edit. *Why* is the reason the work started; this is how
+  anyone later can tell whether it worked.
 - **Verification** — the commands run and their real results. Name anything left unverified.
 - **Critical notes** — security implications, rollback considerations, breaking changes,
   and follow-ups an on-call engineer or auditor would need.
@@ -34,6 +38,11 @@ deliberate constraint. Three or four lines each — date, decision, why, what it
 
 Rejected alternatives matter as much as the choice. Most wasted sessions are a rediscovery
 of an option that was already ruled out for a reason nobody wrote down.
+
+Orchestration decisions belong here too, not only design ones: a worker role that kept
+over-scoping a class of task, a routing rule that kept misfiring, a slice size that kept
+producing `BLOCKED`. The session brief's routing signal shows the pattern; this log is where
+the conclusion drawn from it survives, since the worker ledger is machine-local.
 
 ## At session start
 

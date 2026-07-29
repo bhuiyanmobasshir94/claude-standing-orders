@@ -63,6 +63,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__CLAUDE_HOME__/hooks/verify-reminder.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   },
 

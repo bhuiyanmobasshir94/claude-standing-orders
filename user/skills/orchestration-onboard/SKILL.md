@@ -75,7 +75,11 @@ Then stop and wait for my approval.
 
 On approval:
 
-1. Write `CLAUDE.md` and `.claude/rules/*.md`.
+1. Write `CLAUDE.md` and `.claude/rules/*.md`. If the repository already has an
+   `AGENTS.md`, do not duplicate it: Claude Code reads `CLAUDE.md` and not `AGENTS.md`, so
+   write a `CLAUDE.md` whose first line is `@AGENTS.md` and put only the Claude-specific
+   additions below that import. One file stays authoritative and both tools read the same
+   instructions. Never maintain the same content in both.
 2. Merge `.claude/settings.json`.
 3. Create the continuity directories if missing: a changelog directory and a decision log.
    If this repository already uses a non-default convention — `docs/adr/`, a root
@@ -84,6 +88,10 @@ On approval:
    ```json
    { "changelogDir": "docs/changelogs", "decisionFile": "docs/decisions/DECISIONS.md" }
    ```
+   Add this project's test and lint commands to the same file as
+   `"verifyCommands": ["make test", "make lint"]`, using the real commands from step 1.
+   This is what activates the verification reminder; without the key that hook stays
+   silent, so a project that skips this simply keeps today's behavior.
 4. Seed the decision log with the standing decisions you found in step 1 that already
    constrain future work — the choices that are load-bearing but written down nowhere.
    Three or four lines each: decision, why, what it rules out.

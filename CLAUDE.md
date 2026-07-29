@@ -42,10 +42,14 @@ own practice, it is product — leave it.
 - **Hook paths are generated, not committed.** `settings.template.json` carries
   `__CLAUDE_HOME__`; `bootstrap.mjs` resolves it per machine.
 - **Observability hooks fail open.** `session-brief.mjs`, `worker-ledger.mjs`,
-  `packet-check.mjs`, and `compact-state.mjs` must exit 0 on every path, including malformed
-  input. There is no authorization boundary among them: `packet-check.mjs` warns and cannot
-  block (`SubagentStart` does not allow it), and `compact-state.mjs` must never block
-  compaction even though `PreCompact` would permit it.
+  `packet-check.mjs`, `compact-state.mjs`, and `verify-reminder.mjs` must exit 0 on every
+  path, including malformed input. There is no authorization boundary among them:
+  `packet-check.mjs` warns and cannot block (`SubagentStart` does not allow it), and
+  `compact-state.mjs` and `verify-reminder.mjs` must never block, even though `PreCompact`
+  and `Stop` would both permit it. `verify-reminder.mjs` is additionally inert unless a
+  project opts in via `verifyCommands` — it must never infer verification commands.
+- **`Stop` fires every assistant turn, not once per session.** Anything hooked there scans
+  incrementally from a saved offset and short-circuits before doing real work.
 - **No subprocess on the session-start path.** `session-brief.mjs` derives the Claude Code
   version from `CLAUDE_CODE_EXECPATH` and stays silent when it cannot. `claude --version`
   costs 0.26–1.5s and belongs in `doctor`, which the user ran on purpose.

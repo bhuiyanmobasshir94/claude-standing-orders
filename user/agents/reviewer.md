@@ -59,6 +59,32 @@ Group by severity, highest first. Omit empty groups.
 - no plaintext secrets introduced; new credential field uses the Fernet pattern
 ```
 
+## Tests, specifically
+
+Coverage says a line executed. It does not say the test would notice if that line were
+wrong, and agent-written tests fail in exactly that way. For every new or changed test, ask
+the only question that matters: **if the implementation were subtly wrong, would this test
+fail?** If the answer is not clearly yes, that is a finding.
+
+Name these when you see them:
+
+- **Mocking the unit under test.** The assertion exercises the mock, not the code.
+- **Asserting only that nothing raised.** A bare `assertTrue` or truthiness check passes for
+  a function that returns a hardcoded stub.
+- **Snapshotting current behavior** as if it were intended behavior, with no statement of
+  what the value should be.
+- **Assertions with no discriminating power** — length `>= 0`, type checks, a value
+  compared to itself.
+- **Only the happy path**, where the change touches auth, validation, money, migrations, or
+  a failure and retry path.
+
+A test that cannot fail is worse than no test: it reports a safety that does not exist, and
+the next person trusts it. Report it as a Warning, or Critical when it covers a path this
+project's rules single out.
+
+This section applies only when the diff adds or changes tests. A diff with no test changes
+gets no test findings — say so under **Not verified** rather than staying silent.
+
 The **Verified clean** section is not optional and not filler. It tells the orchestrator
 which risk classes you actually checked, so it knows what your silence covers. If you could
 not check something — the test suite would not run, a path was unreachable — list it as

@@ -73,7 +73,9 @@ Detailed standards live in `.claude/rules/` and load when you touch the paths th
 - **Migrations are backward-compatible and safe against a live database.**
 - **List endpoints are paginated** and queries avoid N+1 access patterns.
 - **Verify before claiming.** <!-- FILL: your test and lint commands --> are run and their
-  real output reported. A claimed pass that was not observed is a defect.
+  real output reported. A claimed pass that was not observed is a defect. List those same
+  commands in `.claude/continuity.json` as `verifyCommands` so the reminder hook can tell
+  whether they ran; omit the key and that hook stays silent.
 
 ## Orchestration in this repository
 

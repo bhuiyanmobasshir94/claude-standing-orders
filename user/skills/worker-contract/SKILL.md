@@ -12,7 +12,8 @@ back in a form the orchestrator can integrate without re-reading your work from 
 
 ## Reading the Task Packet
 
-Every delegation should contain five things. Before you touch a file, confirm you have them:
+Every delegation should contain five required fields. Before you touch a file, confirm you
+have them:
 
 | Field | What it gives you |
 | --- | --- |
@@ -20,11 +21,18 @@ Every delegation should contain five things. Before you touch a file, confirm yo
 | **Files** | the read-write set and the read-only set |
 | **Anchors** | existing functions, classes, or patterns to match |
 | **Constraints** | what must not change; which project rules bind this slice |
-| **Done means** | the command(s) that prove it, and required artifacts |
+| **Done means** | the command(s) that prove it, what their output must show, and required artifacts |
 
 If a field is missing and you cannot infer it from the codebase with confidence, return
 `BLOCKED`. Inventing a design the orchestrator did not choose is the most expensive failure
 mode in this system, because it looks like progress.
+
+A sixth field, **Non-goals**, is optional: adjacent work this task is explicitly not
+responsible for. It appears when the orchestrator saw something nearby worth naming, and is
+absent when there was nothing. **Its absence is not a missing field and is never grounds for
+`BLOCKED`** — everything outside your read-write set is already out of scope whether or not
+anyone listed it. When it is present, treat it as binding: naming a non-goal means the
+decision not to touch that work has already been made, and re-opening it is not yours.
 
 ## What you decide, and what you don't
 
