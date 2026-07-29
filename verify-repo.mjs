@@ -448,6 +448,16 @@ writeFileSync(
  *   invocation.
  * @returns {{code: number, out: string}} The process exit code and its captured stdout;
  *   a thrown (non-zero) exit is caught and its stdout still returned rather than swallowed.
+ *
+ * The child runs with its cwd in the sandbox, never in the repository. Every hook resolves
+ * its project root as CLAUDE_PROJECT_DIR, then `payload.cwd`, then `process.cwd()` — and the
+ * hostile payloads below deliberately supply an empty env var and a cwd that does not exist,
+ * so they land on that last fallback by design. With the child inheriting the repo as its
+ * cwd, that fallback made `worker-ledger.mjs` append a real row to the repository's own
+ * `.claude/worker-ledger.jsonl` on every run: agent `implementer`, session `s`, result null.
+ * Enough of those and the session brief reported the report contract as broken, which is the
+ * exact failure this repo exists to prevent — a check that produces misleading data about
+ * the thing it is checking. Sandboxing the cwd closes the whole class, not just the one hook.
  */
 function runHook(file, stdin, env = {}) {
   try {
@@ -455,6 +465,7 @@ function runHook(file, stdin, env = {}) {
       input: stdin,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
+      cwd: SANDBOX,
       env: { ...process.env, CLAUDE_PROJECT_DIR: "", ...env },
       timeout: 20000,
     });
