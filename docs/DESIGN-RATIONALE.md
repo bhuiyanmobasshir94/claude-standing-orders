@@ -433,14 +433,89 @@ cleanup discipline, and no session residue committed by accident.
 - The compaction snapshot's project isolation was exercised with two project roots sharing
   one temp directory: the writing project read its own snapshot back, the other read
   nothing. The file is written mode `0600`.
-- Permission rule syntax was checked against the documentation: the space-glob form
-  (`Bash(rm -rf *)`) is the documented shape, `ask` takes precedence over a more specific
-  `allow`, and ask rules match past a leading environment-variable assignment. The rules
-  themselves were **not** exercised against a live prompt, because doing so requires an
-  interactive approval dialog. That claim is verified by documentation, not by execution.
+- The `ask` permission rules were **exercised against a live Claude Code process**, not
+  inferred from documentation. A control run (allow rule, user scope excluded) deleted its
+  target, proving the harness worked; the identical run with user scope included was
+  blocked with "Permission needed to run rm command", proving the installed
+  `Bash(rm -rf *)` rule both matches and overrides an explicit `allow` for the same
+  pattern. A third isolated run confirmed `rm -r -f` is **not** matched, so the documented
+  coverage limit is real. Three earlier attempts at this test produced confident-looking
+  results that were all invalid — `claude` absent from `PATH`, `timeout` absent on macOS,
+  and a target outside the session's working directory being blocked by the directory
+  boundary rather than by any permission rule. The control is the only reason those were
+  caught rather than reported.
+- Whether a session keeps its id across compaction was settled from **three real compacted
+  transcripts**: each carries a single session id, unchanged either side of the compaction
+  marker. This retired the handoff's mtime fallback rather than justifying it (§8.7).
 
-**A `reviewer` pass was dispatched on this diff and did not complete** — it terminated on a
-session limit before returning findings. The review recorded here was performed by the
-orchestrator directly against `git diff`. Nothing in this round carries an independent
-review, and the defects listed in §8.3.1 and the handoff isolation fix were found by that
-self-review rather than by a second pair of eyes.
+### 8.7 Independent review, and what it caught
+
+The first `reviewer` dispatch on this diff terminated on a session limit without returning
+findings. A second pass completed and is the source of everything below. It is worth
+recording that the review found a defect the author's own re-reading had missed, and that
+the defect was introduced *by* an earlier fix in this same round.
+
+**Critical — `doctor` reported a corrupted install as healthy.** §8.3 describes splitting
+drift into "stale" and "locally modified", so a deliberate edit would stop being reported as
+a failure. That split created a hole: a truncated or half-written file also has a hash that
+matches neither the repo nor the manifest, so it landed in "locally modified and kept" and
+passed. Reproduced by truncating the installed `session-brief.mjs` to 400 bytes — `node
+--check` rejects it, and `doctor` still reported 7 of 7 passing and exited 0. A SessionStart
+hook that cannot be parsed was being called healthy by the command whose stated purpose is
+to check that the install works.
+
+The hole is that a hash distinguishes *different* from *expected*, and nothing more. Telling
+a deliberate edit from corruption needs a check that knows what the file is *for*. `doctor`
+now runs `node --check` on every installed hook script — the same check this repo's own
+`CLAUDE.md` already prescribes for a human touching those files. That is check eight.
+
+The lesson generalizes past this bug: **a fix that makes a check quieter should be suspected
+of making it blinder.** The "locally modified and kept" classification was correct and worth
+keeping; it just needed a second check to cover what it deliberately stopped reporting.
+
+**Also fixed from that review:**
+
+- `compact-state.mjs` matched `DONE|PARTIAL|BLOCKED|PASS|FAIL` unanchored, taking the first
+  such word anywhere in a worker's report. A report reading "the tests PASS locally, but
+  then I hit an ambiguity" above a `## Result` of `BLOCKED` recorded `PASS` — the wrong
+  outcome, in the artifact whose whole job is to survive a session that ended badly. It now
+  uses the anchored `## Result` pattern `worker-ledger.mjs` already used.
+- `readTranscript()` read the entire file before slicing to the 4 MB tail, so the cap
+  bounded nothing. It now reads only the tail bytes through a file descriptor.
+- `frontmatter()` mis-parsed two legal YAML shapes — an inline flow sequence
+  (`skills: [a, b]`) and a comment-only value (`skills:   # note`) — each producing a false
+  FAIL for an agent whose skills are installed correctly. Both now parse. The reviewer also
+  confirmed that `description: >` block scalars do *not* break `skills:` termination, which
+  had been the author's main worry and was unfounded.
+- `mergeSettings` had two byte-identical array branches, and its docstring claimed
+  non-`hooks` arrays were "replaced only when the target does not already define them",
+  which the code never did. Every array is concatenated and de-duplicated. The dead branch
+  is gone and the docstring now describes the real behavior, which is also the right
+  behavior: a user's own `permissions.ask` entry survives alongside this package's
+  baseline.
+- The installer's top-of-file comment still said "existing keys are preserved" after
+  `DEPRECATED_KEYS` began removing retired keys unconditionally. It now states the
+  exception and how to opt out of it (remove the key from that list, not from
+  `settings.json`, which would only be deleted again next install).
+- The snapshot's `0600` mode was only applied on creation, so a second `PreCompact` in one
+  session could inherit a looser mode. It is now chmod'd after every write.
+- `EFFORT_CAPABLE` treated a bare `opus` / `sonnet` alias as effort-capable unconditionally,
+  though §7 documents that those resolve to older generations on Bedrock and Vertex — some
+  of which do not support `effort` at all. When one of those providers is configured, the
+  check now reports the alias as not decidable here rather than claiming a pass.
+
+**One finding fixed by deletion rather than by patching.** The reviewer showed that two
+concurrent sessions in one project could read each other's pre-compaction snapshot through
+the 15-minute "recent handoff" fallback. That fallback existed only to cover a compaction
+handing the session a new id — and the transcript evidence in §8.6 shows that does not
+happen. The fallback guarded against nothing and leaked across sessions, so it was removed
+rather than fenced. The lookup is now an exact match on project *and* session.
+
+Removing it also removed the reason for the speculative `CLAUDE_CODE_VERSION` branch in
+`claudeVersion()`: that variable is set by no Claude Code runtime observed here, and a
+fallback that never fires reads as verified behavior to the next maintainer.
+
+**Reviewer output is input, not verdict.** Every finding above was reproduced against the
+working tree before being accepted. The review also wrote agent-memory files into
+`.claude/agent-memory/reviewer/`, which this repository's `CLAUDE.md` explicitly forbids —
+those were removed. A worker's report is not exempt from the project's own rules.

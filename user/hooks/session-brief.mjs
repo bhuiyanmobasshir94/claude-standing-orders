@@ -65,8 +65,6 @@ const MAX_TOTAL_CHARS = 8000;
 
 /** How many ledger rows the routing rollup considers. Older runs are not evidence today. */
 const LEDGER_WINDOW = 40;
-/** A compaction handoff older than this belongs to a different session; ignore it. */
-const HANDOFF_MAX_AGE_MS = 15 * 60 * 1000;
 
 function readStdinSync() {
   try {
@@ -212,9 +210,9 @@ function cmpVersion(a, b) {
  * guessing and crying wolf.
  */
 function claudeVersion() {
-  const fromEnv = process.env.CLAUDE_CODE_VERSION;
-  if (fromEnv && /^\d+\.\d+\.\d+/.test(fromEnv)) return fromEnv.match(/^\d+\.\d+\.\d+/)[0];
-
+  // Only CLAUDE_CODE_EXECPATH is used. An earlier version also consulted a
+  // CLAUDE_CODE_VERSION variable, which is not set by any Claude Code runtime observed
+  // here — speculative fallbacks read as verified behavior and are worse than none.
   const exec = process.env.CLAUDE_CODE_EXECPATH;
   if (!exec) return null;
 
@@ -331,42 +329,33 @@ function ledger(root) {
 }
 
 /**
- * Find the snapshot `compact-state.mjs` wrote before the last compaction, if this session
- * is the one it belongs to. A compaction may hand the session a new id, so a recent
- * handoff is accepted as a fallback; anything older than the cutoff is another session's
- * residue and is ignored.
+ * Find the snapshot `compact-state.mjs` wrote before the last compaction, for this session
+ * and this project only.
+ *
+ * The match is exact on both. An earlier version also accepted any recent snapshot in the
+ * project, to cover a compaction handing the session a new id — but that does not happen:
+ * three real compacted transcripts each carry a single session id, unchanged either side
+ * of the compaction marker. The fallback guarded against nothing and let two concurrent
+ * sessions in one project read each other's state, so it is gone.
  */
 function handoff(payload, root) {
-  // Must match compact-state.mjs `snapshotName` exactly, or nothing is ever found.
-  const prefix = `claude-orchestration-${createHash("sha256")
-    .update(root)
-    .digest("hex")
-    .slice(0, 12)}-`;
-  const mine = (file) => {
-    // On Linux the temp dir is a shared /tmp. Only read a snapshot this user owns.
-    if (typeof process.getuid !== "function") return true;
-    try {
-      return statSync(file).uid === process.getuid();
-    } catch {
-      return false;
-    }
-  };
-
   const id = typeof payload.session_id === "string" ? payload.session_id : null;
-  if (id) {
-    const exact = join(tmpdir(), `${prefix}${id}.md`);
-    if (existsSync(exact) && mine(exact)) return exact;
+  if (!id) return null;
+
+  // Must match compact-state.mjs `snapshotName` exactly, or nothing is ever found.
+  const key = createHash("sha256").update(root).digest("hex").slice(0, 12);
+  const exact = join(tmpdir(), `claude-orchestration-${key}-${id}.md`);
+  if (!existsSync(exact)) return null;
+
+  // On Linux the temp dir is a shared /tmp. Only read a snapshot this user owns.
+  if (typeof process.getuid === "function") {
+    try {
+      if (statSync(exact).uid !== process.getuid()) return null;
+    } catch {
+      return null;
+    }
   }
-  try {
-    const recent = readdirSync(tmpdir())
-      .filter((n) => n.startsWith(prefix) && n.endsWith(".md"))
-      .map((n) => ({ p: join(tmpdir(), n), t: statSync(join(tmpdir(), n)).mtimeMs }))
-      .filter((f) => Date.now() - f.t < HANDOFF_MAX_AGE_MS && mine(f.p))
-      .sort((a, b) => b.t - a.t);
-    return recent.length ? recent[0].p : null;
-  } catch {
-    return null;
-  }
+  return exact;
 }
 
 function build(root, payload) {

@@ -22,8 +22,15 @@
  *   --force      overwrite locally modified files instead of skipping them
  *   --home=PATH  target a config dir other than the default (for testing)
  *
- * Settings are merged, never replaced: existing keys are preserved, hook arrays are
- * concatenated with de-duplication, and a timestamped backup is written before any change.
+ * Settings are merged, not replaced: existing keys are preserved, arrays are concatenated
+ * with de-duplication, and a timestamped backup is written before any change.
+ *
+ * The one exception is `DEPRECATED_KEYS` below — keys this package has deliberately
+ * retired, which are removed on every install with no opt-out. That is the point: a
+ * retired setting has to actually leave every machine, or the machines diverge. Recovery
+ * is the timestamped backup written immediately before the change. To keep such a key,
+ * remove it from that list rather than re-adding it to settings.json, which would only be
+ * deleted again on the next install.
  */
 
 import {
@@ -120,26 +127,27 @@ function isPlainObject(v) {
 }
 
 /**
- * Deep-merge settings. Incoming values win for scalars, but:
- *  - arrays under `hooks` are concatenated and de-duplicated by JSON identity, so an
- *    existing SessionStart hook (e.g. from a plugin) survives alongside ours;
- *  - other arrays are replaced only when the target does not already define them.
+ * Deep-merge settings. Incoming values win for scalars. **Every** array is concatenated and
+ * de-duplicated by JSON identity, wherever it appears — not only under `hooks`.
+ *
+ * That is deliberate for the arrays this package actually writes: an existing SessionStart
+ * hook from a plugin survives alongside ours, and a user's own `permissions.ask` entry
+ * survives alongside the destructive-command baseline. Claude Code merges permission rules
+ * across scopes anyway, so concatenating matches how they are consumed.
+ *
+ * This comment previously claimed non-`hooks` arrays were "replaced only when the target
+ * does not already define them", which the code never did: the two branches were
+ * byte-identical. Concatenation is the real and intended behavior.
  */
-function mergeSettings(existing, incoming, path = []) {
+function mergeSettings(existing, incoming) {
   const out = { ...existing };
   for (const [k, v] of Object.entries(incoming)) {
-    const here = [...path, k];
     const cur = out[k];
     if (isPlainObject(v) && isPlainObject(cur)) {
-      out[k] = mergeSettings(cur, v, here);
+      out[k] = mergeSettings(cur, v);
     } else if (Array.isArray(v) && Array.isArray(cur)) {
-      if (here[0] === "hooks") {
-        const seen = new Set(cur.map((x) => JSON.stringify(x)));
-        out[k] = [...cur, ...v.filter((x) => !seen.has(JSON.stringify(x)))];
-      } else {
-        const seen = new Set(cur.map((x) => JSON.stringify(x)));
-        out[k] = [...cur, ...v.filter((x) => !seen.has(JSON.stringify(x)))];
-      }
+      const seen = new Set(cur.map((x) => JSON.stringify(x)));
+      out[k] = [...cur, ...v.filter((x) => !seen.has(JSON.stringify(x)))];
     } else {
       out[k] = v;
     }
@@ -362,22 +370,42 @@ function claudeVersion() {
 function frontmatter(text) {
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!m) return null;
+
+  // Trailing `# comment` and surrounding quotes are the two YAML niceties that show up in
+  // hand-written agent files. Stripping them here keeps a legal file from being reported as
+  // a broken one — a false FAIL teaches the reader to ignore `doctor`.
+  const scrub = (s) =>
+    s
+      .replace(/(?:^|\s)#.*$/, "") // trailing comment, or a value that is only a comment
+      .trim()
+      .replace(/^["']|["']$/g, "");
+
   const out = { skills: [] };
   let inSkills = false;
   for (const line of m[1].split(/\r?\n/)) {
-    const item = line.match(/^\s+-\s+(\S+)/);
+    const item = line.match(/^\s+-\s+(.+)$/);
     if (inSkills && item) {
-      out.skills.push(item[1]);
+      const s = scrub(item[1]);
+      if (s) out.skills.push(s);
       continue;
     }
     const kv = line.match(/^([A-Za-z][\w-]*):\s*(.*)$/);
     if (!kv) continue;
     inSkills = false;
-    if (kv[1] === "skills") {
-      inSkills = true;
-      if (kv[2].trim()) out.skills.push(kv[2].trim());
+    const value = scrub(kv[2]);
+    if (kv[1] !== "skills") {
+      out[kv[1]] = value;
+      continue;
+    }
+    if (value.startsWith("[")) {
+      // Inline flow sequence: `skills: [worker-contract, api-design]`
+      for (const part of value.replace(/^\[/, "").replace(/\]$/, "").split(",")) {
+        const s = scrub(part);
+        if (s) out.skills.push(s);
+      }
     } else {
-      out[kv[1]] = kv[2].trim();
+      inSkills = true; // block list follows on subsequent lines
+      if (value) out.skills.push(value);
     }
   }
   return out;
@@ -390,6 +418,16 @@ function frontmatter(text) {
  * Anything not matched here is treated as effort-incapable.
  */
 const EFFORT_CAPABLE = /^(opus|sonnet|fable)$|opus-5|sonnet-5|fable-5|opus-4-8|opus-4-7|opus-4-6|sonnet-4-6/i;
+
+/**
+ * Bedrock and Vertex resolve the bare `opus` / `sonnet` aliases to older generations than
+ * the Anthropic API does, and some of those do not support `effort`. When one of these is
+ * in play, a bare alias is not decidable from an agent file alone.
+ */
+const ALT_PROVIDER =
+  (process.env.CLAUDE_CODE_USE_BEDROCK === "1" && "Bedrock") ||
+  (process.env.CLAUDE_CODE_USE_VERTEX === "1" && "Vertex") ||
+  null;
 
 function doDoctor() {
   const checks = [];
@@ -481,24 +519,49 @@ function doDoctor() {
     }
 
     const badHooks = [];
+    const resolved = [];
     let hookCount = 0;
     for (const cmd of scripts) {
       const match = String(cmd || "").match(/"([^"]+\.(?:mjs|js|sh|py))"|(\S+\.(?:mjs|js|sh|py))/);
       const p = match && (match[1] || match[2]);
       if (!p) continue; // e.g. `rtk hook claude` — a PATH lookup, not a file we can check
       hookCount++;
-      if (!existsSync(p)) badHooks.push(p);
+      if (existsSync(p)) resolved.push(p);
+      else badHooks.push(p);
     }
     add(
       "hook and statusLine paths resolve",
       badHooks.length === 0,
       badHooks.length ? `missing: ${badHooks.join(", ")}` : `${hookCount} script path(s)`
     );
+
+    // A path that exists is not a hook that runs. A truncated or half-written file passes
+    // `existsSync` and then fails at the first session — and the drift check above cannot
+    // catch it, because a corrupted file and a deliberate local edit are indistinguishable
+    // by hash. `node --check` is what tells them apart, and it is the same check this
+    // repo's CLAUDE.md already prescribes for a human changing these files.
+    const unparseable = [];
+    for (const p of resolved) {
+      if (!/\.m?js$/.test(p)) continue; // only JS is ours to parse
+      try {
+        execFileSync(process.execPath, ["--check", p], { stdio: "ignore", timeout: 20000 });
+      } catch {
+        unparseable.push(p);
+      }
+    }
+    add(
+      "installed hook scripts parse",
+      unparseable.length === 0,
+      unparseable.length
+        ? `not valid JavaScript: ${unparseable.join(", ")}`
+        : `${resolved.filter((p) => /\.m?js$/.test(p)).length} script(s) pass node --check`
+    );
   }
 
   // 5 and 6. Agent skills resolve; no effort declared on an effort-incapable model.
   const badSkills = [];
   const badEffort = [];
+  const unknownEffort = [];
   const agentDir = join(DEST, "agents");
   const agents = existsSync(agentDir)
     ? readdirSync(agentDir).filter((n) => n.endsWith(".md"))
@@ -519,8 +582,15 @@ function doDoctor() {
     // `inherit` (and an absent `model`, which means the same thing) resolves to the main
     // conversation's model, so whether it supports effort is not knowable from this file.
     // Flagging it would be a false positive, not a finding.
-    if (fm.effort && fm.model && fm.model !== "inherit" && !EFFORT_CAPABLE.test(fm.model)) {
+    if (!fm.effort || !fm.model || fm.model === "inherit") continue;
+    if (!EFFORT_CAPABLE.test(fm.model)) {
       badEffort.push(`${name}: effort: ${fm.effort} on model: ${fm.model}`);
+    } else if (ALT_PROVIDER && /^(opus|sonnet|fable)$/i.test(fm.model)) {
+      // On Bedrock and Vertex a bare alias resolves to an older generation than on the
+      // Anthropic API (see docs/DESIGN-RATIONALE.md §7), and some of those do not support
+      // effort at all. This check cannot see which model the alias resolves to here, so it
+      // reports unknown rather than claiming a pass it has not established.
+      unknownEffort.push(`${name}: model: ${fm.model} resolves per-provider on ${ALT_PROVIDER}`);
     }
   }
   add(
@@ -531,7 +601,11 @@ function doDoctor() {
   add(
     "no `effort` on an effort-incapable model",
     badEffort.length === 0,
-    badEffort.length ? badEffort.join("; ") : `${agents.length} agent(s)`
+    badEffort.length
+      ? badEffort.join("; ")
+      : unknownEffort.length
+        ? `${agents.length} agent(s); not decidable here: ${unknownEffort.join("; ")}`
+        : `${agents.length} agent(s)`
   );
 
   console.log(c.bold(`\nOrchestrator doctor`));

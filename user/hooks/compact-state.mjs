@@ -24,7 +24,9 @@
  * though the event allows it.
  */
 
-import { readFileSync, writeFileSync, statSync, existsSync } from "node:fs";
+import {
+  readFileSync, writeFileSync, statSync, existsSync, openSync, readSync, closeSync, chmodSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -32,7 +34,14 @@ import { createHash } from "node:crypto";
 /** A long session's transcript can be large; only the tail is worth scanning. */
 const MAX_TRANSCRIPT_BYTES = 4_000_000;
 const MAX_FILES_LISTED = 40;
-const RESULT_RE = /\b(DONE|PARTIAL|BLOCKED|PASS|FAIL)\b/;
+/**
+ * Anchored to the report contract's `## Result` heading, matching `worker-ledger.mjs`.
+ * An unanchored search would take the first of these words appearing anywhere in the
+ * report — "the tests PASS locally, but then I hit an ambiguity" ahead of a `## Result` of
+ * BLOCKED yields exactly the wrong outcome, in the snapshot whose entire job is to survive
+ * a session that ended badly.
+ */
+const RESULT_RE = /^##\s*Result\s*\r?\n+\s*(DONE|PARTIAL|BLOCKED|PASS|FAIL)\b/im;
 const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
 
 function readStdinSync() {
@@ -76,13 +85,26 @@ function resultText(block) {
   return "";
 }
 
+/**
+ * Read at most the last MAX_TRANSCRIPT_BYTES, without pulling the whole file into memory
+ * first. Reading it all and then slicing would defeat the point of the cap and can hit
+ * V8's string-length ceiling on a pathological transcript — a process-level failure that
+ * the surrounding try/catch would not reliably convert into a clean exit 0.
+ */
 function readTranscript(path) {
-  if (statSync(path).size > MAX_TRANSCRIPT_BYTES) {
-    const tail = readFileSync(path, "utf8").slice(-MAX_TRANSCRIPT_BYTES);
-    // The slice almost certainly lands mid-line; drop the partial leading record.
+  const size = statSync(path).size;
+  if (size <= MAX_TRANSCRIPT_BYTES) return readFileSync(path, "utf8");
+
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(MAX_TRANSCRIPT_BYTES);
+    const read = readSync(fd, buf, 0, MAX_TRANSCRIPT_BYTES, size - MAX_TRANSCRIPT_BYTES);
+    const tail = buf.subarray(0, read).toString("utf8");
+    // The read almost certainly lands mid-line; drop the partial leading record.
     return tail.slice(tail.indexOf("\n") + 1);
+  } finally {
+    closeSync(fd);
   }
-  return readFileSync(path, "utf8");
 }
 
 function scan(text) {
@@ -175,12 +197,16 @@ try {
 
   const id = typeof payload.session_id === "string" ? payload.session_id : "unknown";
   // Mode 0600: on a shared /tmp the snapshot names this session's files and workers, which
-  // is nobody else's business.
-  writeFileSync(
-    join(tmpdir(), snapshotName(projectRoot(payload), id)),
-    render(payload, dispatched, filesTouched),
-    { encoding: "utf8", mode: 0o600 }
-  );
+  // is nobody else's business. The `mode` option only applies when the file is created, so
+  // a second PreCompact in the same session would inherit whatever mode the first left.
+  // chmod after writing makes the permission hold on every write, not just the first.
+  const out = join(tmpdir(), snapshotName(projectRoot(payload), id));
+  writeFileSync(out, render(payload, dispatched, filesTouched), { encoding: "utf8", mode: 0o600 });
+  try {
+    chmodSync(out, 0o600);
+  } catch {
+    /* best effort: a snapshot that exists with looser mode still beats no snapshot */
+  }
   process.exit(0);
 } catch {
   // Observability surface: never block compaction.
