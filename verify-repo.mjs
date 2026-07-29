@@ -1,0 +1,544 @@
+#!/usr/bin/env node
+/**
+ * verify-repo.mjs — structural invariants for the orchestrator repository.
+ *
+ * Checks properties rather than an exact file list, so it stays valid as the repo grows.
+ * Complements `bootstrap.mjs status/doctor`, which checks the INSTALLED state in
+ * ~/.claude; this checks the SOURCE state in the repo.
+ *
+ * Usage:  node verify-repo.mjs            (from the repo root)
+ *         node verify-repo.mjs --verbose
+ *
+ * Exits 0 if every invariant holds, 1 otherwise. No dependencies.
+ */
+
+import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { join, relative, basename } from "node:path";
+import { execFileSync } from "node:child_process";
+
+const ROOT = process.cwd();
+const VERBOSE = process.argv.includes("--verbose");
+
+const AGENT_FIELDS = new Set([
+  "name", "description", "tools", "disallowedTools", "model", "permissionMode", "maxTurns",
+  "skills", "mcpServers", "hooks", "memory", "background", "effort", "isolation", "color",
+  "initialPrompt",
+]);
+const SKILL_FIELDS = new Set([
+  "name", "description", "disable-model-invocation", "user-invocable", "allowed-tools",
+  "model", "effort", "context", "agent", "hooks", "paths", "argument-hint", "arguments",
+]);
+const RULE_FIELDS = new Set(["paths"]);
+
+const MODEL_ALIASES = new Set(["sonnet", "opus", "haiku", "fable", "inherit", "default", "best"]);
+const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+/** Models that support effort levels. Haiku is deliberately absent. */
+const EFFORT_CAPABLE = new Set(["sonnet", "opus", "fable", "best"]);
+
+const CLAUDE_MD_MAX_LINES = 170;
+const LEAK_TERMS = /\b(django|celery|IBBL|serializer|SESCredential|drf)\b/i;
+
+let failures = 0;
+let checks = 0;
+
+function pass(msg) {
+  checks++;
+  if (VERBOSE) console.log(`  ok    ${msg}`);
+}
+function fail(msg, detail) {
+  checks++;
+  failures++;
+  console.log(`  FAIL  ${msg}${detail ? `\n          ${detail}` : ""}`);
+}
+function section(name) {
+  console.log(`\n${name}`);
+}
+
+/** Minimal YAML frontmatter reader for the subset used here: scalars, lists, block scalars. */
+function frontmatter(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
+  if (!m) return null;
+  const out = {};
+  let key = null;
+  let inBlock = false;
+
+  for (const raw of m[1].split(/\r?\n/)) {
+    if (!raw.trim()) continue;
+
+    const indented = /^\s/.test(raw);
+    if (inBlock && indented) continue; // block scalar continuation
+    if (indented) {
+      const item = /^\s*-\s+(.*)$/.exec(raw);
+      if (item && key) {
+        if (!Array.isArray(out[key])) out[key] = [];
+        out[key].push(unquote(item[1].trim()));
+      }
+      continue;
+    }
+
+    inBlock = false;
+    if (raw.trim().startsWith("#")) continue;
+
+    const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(raw);
+    if (!kv) continue;
+    key = kv[1];
+    const val = kv[2].trim();
+    if (val === "" ) { out[key] = null; }
+    else if (/^[>|][-+]?$/.test(val)) { out[key] = "<block>"; inBlock = true; }
+    else { out[key] = unquote(val); }
+  }
+  return out;
+}
+const unquote = (s) => s.replace(/^['"]|['"]$/g, "");
+
+function walk(dir, acc = []) {
+  if (!existsSync(dir)) return acc;
+  for (const name of readdirSync(dir)) {
+    if (name === ".git" || name === "node_modules") continue;
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) walk(full, acc);
+    else acc.push(full);
+  }
+  return acc;
+}
+const rel = (p) => relative(ROOT, p).split("\\").join("/");
+
+// ── 1. Layout ────────────────────────────────────────────────────────────────
+section("Layout");
+for (const p of ["bootstrap.mjs", "user", "user/agents", "user/skills", "user/rules",
+                 "user/hooks", "user/CLAUDE.md", "user/settings.template.json",
+                 "project-template", "project-template/rules", "examples", "docs"]) {
+  existsSync(join(ROOT, p)) ? pass(`${p} present`) : fail(`${p} missing`);
+}
+for (const p of ["project", "INSTALL_PROMPT.md"]) {
+  existsSync(join(ROOT, p))
+    ? fail(`${p} still present — v1 leftover, should have been removed`)
+    : pass(`${p} correctly absent`);
+}
+
+// ── 2. Scripts parse ─────────────────────────────────────────────────────────
+section("Scripts");
+const scripts = walk(ROOT).filter((f) => f.endsWith(".mjs") || f.endsWith(".js"));
+if (!scripts.length) fail("no .mjs scripts found");
+for (const f of scripts) {
+  try {
+    execFileSync(process.execPath, ["--check", f], { stdio: "pipe" });
+    pass(`${rel(f)} parses`);
+  } catch (e) {
+    fail(`${rel(f)} does not parse`, String(e.stderr || e).split("\n")[0]);
+  }
+}
+
+// ── 3. JSON parses ───────────────────────────────────────────────────────────
+section("JSON");
+for (const f of walk(ROOT).filter((f) => f.endsWith(".json"))) {
+  try {
+    JSON.parse(readFileSync(f, "utf8"));
+    pass(`${rel(f)} parses`);
+  } catch (e) {
+    fail(`${rel(f)} invalid JSON`, e.message);
+  }
+}
+const tpl = join(ROOT, "user/settings.template.json");
+if (existsSync(tpl)) {
+  readFileSync(tpl, "utf8").includes("__CLAUDE_HOME__")
+    ? pass("settings.template.json keeps the __CLAUDE_HOME__ placeholder")
+    : fail("settings.template.json lost __CLAUDE_HOME__ — hook paths will not resolve per machine");
+}
+
+// ── 4. Agents ────────────────────────────────────────────────────────────────
+section("Agents");
+const agentDir = join(ROOT, "user/agents");
+const agents = existsSync(agentDir)
+  ? readdirSync(agentDir).filter((f) => f.endsWith(".md")).map((f) => join(agentDir, f))
+  : [];
+if (agents.length < 4) fail(`expected at least 4 agents, found ${agents.length}`);
+
+const installedSkills = new Set(
+  existsSync(join(ROOT, "user/skills"))
+    ? readdirSync(join(ROOT, "user/skills")).filter((d) =>
+        existsSync(join(ROOT, "user/skills", d, "SKILL.md")))
+    : []
+);
+
+for (const f of agents) {
+  const name = basename(f);
+  const fm = frontmatter(readFileSync(f, "utf8"));
+  if (!fm) { fail(`${name} has no YAML frontmatter`); continue; }
+
+  const unknown = Object.keys(fm).filter((k) => !AGENT_FIELDS.has(k));
+  unknown.length ? fail(`${name} unknown frontmatter: ${unknown.join(", ")}`)
+                 : pass(`${name} frontmatter fields valid`);
+
+  if (!fm.name) fail(`${name} missing required: name`);
+  if (!fm.description) fail(`${name} missing required: description`);
+
+  const model = fm.model;
+  if (model && !MODEL_ALIASES.has(model) && !String(model).startsWith("claude-")) {
+    fail(`${name} unrecognized model: ${model}`);
+  }
+
+  if (fm.effort !== undefined) {
+    if (!EFFORTS.has(fm.effort)) fail(`${name} invalid effort: ${fm.effort}`);
+    else if (!EFFORT_CAPABLE.has(model)) {
+      fail(`${name} declares effort:${fm.effort} on model:${model}, which has no effort support — silently ignored`);
+    } else pass(`${name} effort:${fm.effort} valid on ${model}`);
+  } else pass(`${name} no effort field (model:${model})`);
+
+  const tools = String(fm.tools || "");
+  /\bAgent\b|\bTask\b/.test(tools)
+    ? fail(`${name} lists a subagent-spawning tool — workers must not fan out`)
+    : pass(`${name} cannot spawn subagents`);
+
+  for (const s of fm.skills || []) {
+    installedSkills.has(s) ? pass(`${name} preloads ${s} (resolves)`)
+                           : fail(`${name} preloads "${s}" but user/skills/${s}/SKILL.md does not exist`);
+  }
+}
+
+// ── 5. Skills ────────────────────────────────────────────────────────────────
+section("Skills");
+for (const d of installedSkills) {
+  const f = join(ROOT, "user/skills", d, "SKILL.md");
+  const fm = frontmatter(readFileSync(f, "utf8"));
+  if (!fm) { fail(`skills/${d}/SKILL.md has no frontmatter`); continue; }
+  const unknown = Object.keys(fm).filter((k) => !SKILL_FIELDS.has(k));
+  unknown.length ? fail(`skills/${d} unknown frontmatter: ${unknown.join(", ")}`)
+                 : pass(`skills/${d} frontmatter valid`);
+  if (!fm.name) fail(`skills/${d} missing name`);
+  if (!fm.description) fail(`skills/${d} missing description`);
+}
+// A preloaded skill must not disable model invocation.
+for (const f of agents) {
+  const fm = frontmatter(readFileSync(f, "utf8")) || {};
+  for (const s of fm.skills || []) {
+    const sf = join(ROOT, "user/skills", s, "SKILL.md");
+    if (!existsSync(sf)) continue;
+    const sfm = frontmatter(readFileSync(sf, "utf8")) || {};
+    String(sfm["disable-model-invocation"]) === "true"
+      ? fail(`skills/${s} sets disable-model-invocation but is preloaded by ${basename(f)} — cannot be preloaded`)
+      : pass(`skills/${s} is preloadable by ${basename(f)}`);
+  }
+}
+
+// ── 6. Rules ─────────────────────────────────────────────────────────────────
+section("Rules");
+const ruleFiles = [
+  ...walk(join(ROOT, "user/rules")),
+  ...walk(join(ROOT, "project-template/rules")),
+].filter((f) => f.endsWith(".md"));
+if (!ruleFiles.length) fail("no rule files found");
+for (const f of ruleFiles) {
+  const fm = frontmatter(readFileSync(f, "utf8"));
+  if (fm === null) { pass(`${rel(f)} always-loaded (no frontmatter)`); continue; }
+  const unknown = Object.keys(fm).filter((k) => !RULE_FIELDS.has(k));
+  unknown.length ? fail(`${rel(f)} unknown frontmatter: ${unknown.join(", ")}`)
+                 : pass(`${rel(f)} path-scoped (${(fm.paths || []).length} globs)`);
+}
+
+// ── 7. Size discipline ───────────────────────────────────────────────────────
+section("Size");
+for (const p of ["user/CLAUDE.md", "project-template/CLAUDE.md"]) {
+  const f = join(ROOT, p);
+  if (!existsSync(f)) continue;
+  const n = readFileSync(f, "utf8").split(/\r?\n/).length;
+  n <= CLAUDE_MD_MAX_LINES ? pass(`${p} ${n} lines (limit ${CLAUDE_MD_MAX_LINES})`)
+                           : fail(`${p} ${n} lines exceeds ${CLAUDE_MD_MAX_LINES}`);
+}
+
+// ── 8. Stack-agnosticism ─────────────────────────────────────────────────────
+section("Stack-agnosticism");
+let leaks = 0;
+for (const f of [...walk(join(ROOT, "user")), ...walk(join(ROOT, "project-template"))]) {
+  if (!/\.(md|json|mjs|js)$/.test(f)) continue;
+  const lines = readFileSync(f, "utf8").split(/\r?\n/);
+  lines.forEach((line, i) => {
+    if (LEAK_TERMS.test(line)) { fail(`${rel(f)}:${i + 1} framework-specific term`, line.trim().slice(0, 100)); leaks++; }
+  });
+}
+if (!leaks) pass("user/ and project-template/ contain no framework-specific terms");
+
+// ── 9. Hook wiring ───────────────────────────────────────────────────────────
+// Every hook file is reachable from the template, every registered command points at a file
+// that exists, and no hook is wired to an event that cannot feed it. A hook nobody calls and
+// a command naming a deleted file both look fine in isolation.
+section("Hook wiring");
+const HOOK_DIR = join(ROOT, "user/hooks");
+const hookFiles = existsSync(HOOK_DIR)
+  ? readdirSync(HOOK_DIR).filter((f) => f.endsWith(".mjs"))
+  : [];
+let template = null;
+try {
+  template = JSON.parse(
+    readFileSync(tpl, "utf8").split("__CLAUDE_HOME__").join("/HOME").split("__MIN_VERSION__").join("9.9.9")
+  );
+} catch (e) {
+  fail("settings.template.json does not parse after placeholder substitution", e.message);
+}
+
+/** [event, matcher, command] for every hook the template registers. */
+const registered = [];
+if (template) {
+  for (const [event, groups] of Object.entries(template.hooks || {})) {
+    for (const g of groups || []) {
+      for (const h of g.hooks || []) registered.push([event, g.matcher || "*", String(h.command || "")]);
+    }
+  }
+}
+
+for (const f of hookFiles) {
+  const wired = registered.filter(([, , cmd]) => cmd.includes(`hooks/${f}`));
+  wired.length
+    ? pass(`${f} wired to ${wired.map(([e]) => e).join(", ")}`)
+    : fail(`${f} exists but settings.template.json never registers it — it will never run`);
+}
+for (const [event, , cmd] of registered) {
+  const m = cmd.match(/hooks\/([\w.-]+\.mjs)/);
+  if (!m) continue;
+  hookFiles.includes(m[1])
+    ? pass(`${event} → ${m[1]} resolves to a file in user/hooks/`)
+    : fail(`${event} registers ${m[1]}, which does not exist in user/hooks/`);
+}
+
+/**
+ * `packet-check.mjs` must not regress to `SubagentStart`.
+ *
+ * It shipped there for a full release cycle reading `prompt_text`, a field that payload does
+ * not carry, so it exited silently on every dispatch and warned no one. The event it is wired
+ * to is therefore an invariant, not a preference.
+ */
+const packetWiring = registered.filter(([, , cmd]) => cmd.includes("packet-check.mjs"));
+if (!packetWiring.length) {
+  fail("packet-check.mjs is not registered at all");
+} else {
+  for (const [event, matcher] of packetWiring) {
+    if (event === "SubagentStart") {
+      fail(
+        "packet-check.mjs is wired to SubagentStart, where the payload carries no prompt text",
+        "it is inert there; it belongs on PreToolUse with matcher \"Agent\""
+      );
+    } else if (event === "PreToolUse" && /Agent/.test(matcher)) {
+      pass(`packet-check.mjs on PreToolUse matcher "${matcher}" (the packet is readable there)`);
+    } else {
+      fail(`packet-check.mjs wired to ${event} matcher "${matcher}" — cannot see a Task Packet`);
+    }
+  }
+}
+
+// ── 10. Payload contracts ────────────────────────────────────────────────────
+/**
+ * Each hook is run against a payload **captured from a real Claude Code run**, and checked for
+ * the behaviour that payload should produce.
+ *
+ * This is the check that would have caught the defect that motivated it. Every static test in
+ * this file passed while `packet-check.mjs` read a field the runtime has never sent; only
+ * feeding it a genuine payload and demanding output exposes that. Fixtures are verbatim key
+ * sets from Claude Code 2.1.220 — when a fixture stops matching reality, this is meant to fail.
+ */
+section("Payload contracts");
+const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = await import("node:fs");
+const { tmpdir } = await import("node:os");
+
+const SANDBOX = mkdtempSync(join(tmpdir(), "verify-repo-"));
+const PROJ = join(SANDBOX, "proj");
+mkdirSync(join(PROJ, ".claude"), { recursive: true });
+writeFileSync(join(PROJ, ".claude", "continuity.json"), JSON.stringify({ verifyCommands: ["make test"] }));
+
+const TRANSCRIPT = join(SANDBOX, "transcript.jsonl");
+writeFileSync(
+  TRANSCRIPT,
+  [
+    JSON.stringify({ type: "assistant", message: { content: [
+      { type: "tool_use", id: "tu_1", name: "Agent", input: { subagent_type: "implementer", description: "add export" } }] } }),
+    JSON.stringify({ type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "tu_1", content: "## Result\nDONE\n\n## Files\n- src/a.py" }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [
+      { type: "tool_use", id: "tu_2", name: "Edit", input: { file_path: "/repo/src/a.py" } }] } }),
+  ].join("\n") + "\n"
+);
+
+/** Run a hook with the given stdin. Returns { code, out }. */
+function runHook(file, stdin, env = {}) {
+  try {
+    const out = execFileSync(process.execPath, [join(HOOK_DIR, file)], {
+      input: stdin,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, CLAUDE_PROJECT_DIR: "", ...env },
+      timeout: 20000,
+    });
+    return { code: 0, out };
+  } catch (e) {
+    return { code: e.status === undefined ? 1 : e.status, out: String(e.stdout || "") };
+  }
+}
+
+/**
+ * A packet missing every required field, dispatched to a checked worker role. Payload keys are
+ * exactly those observed on a real PreToolUse/Agent event.
+ */
+const preToolUsePayload = (prompt, subagent_type = "implementer") => JSON.stringify({
+  session_id: "s-1", transcript_path: TRANSCRIPT, cwd: PROJ, prompt_id: "p-1",
+  permission_mode: "default", hook_event_name: "PreToolUse", tool_name: "Agent",
+  tool_input: { description: "d", prompt, subagent_type }, tool_use_id: "toolu_1",
+});
+
+{
+  const r = runHook("packet-check.mjs", preToolUsePayload("fix the export bug"));
+  r.code === 0 && r.out.includes("Task Packet check")
+    ? pass("packet-check warns on a real PreToolUse payload with an incomplete packet")
+    : fail("packet-check produced no warning for an incomplete packet on a real payload",
+           `exit=${r.code} bytes=${r.out.length} — this is the defect that shipped once already`);
+}
+{
+  const full = "## Intent\nx\n## Files\na.py\n## Anchors\nfoo()\n## Constraints\nnone\n## Done means\nmake test passes";
+  const r = runHook("packet-check.mjs", preToolUsePayload(full));
+  r.code === 0 && r.out.trim() === ""
+    ? pass("packet-check stays silent on a complete packet")
+    : fail("packet-check warned on a complete packet — false positive", r.out.slice(0, 160));
+}
+{
+  const r = runHook("packet-check.mjs", preToolUsePayload("no fields here", "verifier"));
+  r.code === 0 && r.out.trim() === ""
+    ? pass("packet-check exempts verifier")
+    : fail("packet-check warned on a verifier dispatch — its packet is a command list", r.out.slice(0, 160));
+}
+{
+  // It must never block: PreToolUse would honour a denial, and this hook is not an
+  // authorization boundary.
+  const r = runHook("packet-check.mjs", preToolUsePayload("nothing"));
+  /permissionDecision/.test(r.out)
+    ? fail("packet-check emitted a permissionDecision — it must warn, never block", r.out.slice(0, 160))
+    : pass("packet-check emits no permissionDecision (warns, never blocks)");
+}
+{
+  // The dead-event regression, asserted behaviourally as well as structurally.
+  const dead = JSON.stringify({
+    session_id: "s-1", transcript_path: TRANSCRIPT, cwd: PROJ, prompt_id: "p-1",
+    agent_id: "a-1", agent_type: "implementer", hook_event_name: "SubagentStart",
+  });
+  const r = runHook("packet-check.mjs", dead);
+  r.code === 0
+    ? pass("packet-check survives a SubagentStart payload (no prompt field) without erroring")
+    : fail("packet-check crashed on a SubagentStart-shaped payload", `exit=${r.code}`);
+}
+{
+  const stop = JSON.stringify({
+    session_id: "s-verify", transcript_path: TRANSCRIPT, cwd: PROJ, prompt_id: "p-1",
+    permission_mode: "default", hook_event_name: "Stop", stop_hook_active: false,
+    last_assistant_message: "done",
+  });
+  const r = runHook("verify-reminder.mjs", stop);
+  r.code === 0 && r.out.includes("verification")
+    ? pass("verify-reminder fires on a real Stop payload after an unverified code edit")
+    : fail("verify-reminder produced no reminder on a real Stop payload", `exit=${r.code} bytes=${r.out.length}`);
+}
+{
+  // Infrastructure is code. A session that touched only Terraform must still be reminded.
+  const tfTranscript = join(SANDBOX, "tf.jsonl");
+  writeFileSync(tfTranscript, JSON.stringify({ type: "assistant", message: { content: [
+    { type: "tool_use", id: "t1", name: "Edit", input: { file_path: "/repo/infra/main.tf" } }] } }) + "\n");
+  const r = runHook("verify-reminder.mjs", JSON.stringify({
+    session_id: "s-tf", transcript_path: tfTranscript, cwd: PROJ, hook_event_name: "Stop",
+  }));
+  r.code === 0 && r.out.includes("verification")
+    ? pass("verify-reminder treats an infrastructure edit (.tf) as code")
+    : fail("verify-reminder ignored a Terraform edit — infra changes need verification too",
+           `exit=${r.code} bytes=${r.out.length}`);
+}
+{
+  // A command merely *mentioned* is not a command that ran. Substring matching silently
+  // suppressed the reminder for the rest of the session on any echo or grep containing it.
+  const mention = join(SANDBOX, "mention.jsonl");
+  writeFileSync(mention, [
+    JSON.stringify({ type: "assistant", message: { content: [
+      { type: "tool_use", id: "t1", name: "Edit", input: { file_path: "/repo/src/a.py" } }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [
+      { type: "tool_use", id: "t2", name: "Bash", input: { command: 'echo "remember to run make test"' } }] } }),
+  ].join("\n") + "\n");
+  const r = runHook("verify-reminder.mjs", JSON.stringify({
+    session_id: "s-mention", transcript_path: mention, cwd: PROJ, hook_event_name: "Stop",
+  }));
+  r.code === 0 && r.out.includes("verification")
+    ? pass("verify-reminder does not accept a merely mentioned command as verification")
+    : fail("verify-reminder counted `echo \"...make test\"` as having verified", `bytes=${r.out.length}`);
+}
+{
+  // ...and a command that genuinely ran still silences it, including behind an env prefix.
+  const ran = join(SANDBOX, "ran.jsonl");
+  writeFileSync(ran, [
+    JSON.stringify({ type: "assistant", message: { content: [
+      { type: "tool_use", id: "t1", name: "Edit", input: { file_path: "/repo/src/a.py" } }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [
+      { type: "tool_use", id: "t2", name: "Bash", input: { command: "cd /repo && CI=1 make test -j4" } }] } }),
+  ].join("\n") + "\n");
+  const r = runHook("verify-reminder.mjs", JSON.stringify({
+    session_id: "s-ran", transcript_path: ran, cwd: PROJ, hook_event_name: "Stop",
+  }));
+  r.code === 0 && r.out.trim() === ""
+    ? pass("verify-reminder stays silent when the declared command actually ran")
+    : fail("verify-reminder nagged a session that did verify — false positive", r.out.slice(0, 160));
+}
+{
+  const ledgerProj = join(SANDBOX, "ledger");
+  mkdirSync(ledgerProj, { recursive: true });
+  const stop = JSON.stringify({
+    session_id: "s-2", transcript_path: TRANSCRIPT, cwd: ledgerProj, agent_id: "a-1",
+    agent_type: "implementer", hook_event_name: "SubagentStop", stop_hook_active: false,
+    last_assistant_message: "## Result\nDONE\n\n## Files\n- a.py",
+  });
+  const r = runHook("worker-ledger.mjs", stop);
+  let row = null;
+  try { row = JSON.parse(readFileSync(join(ledgerProj, ".claude", "worker-ledger.jsonl"), "utf8").trim()); } catch {}
+  r.code === 0 && row && row.result === "DONE" && row.agent === "implementer"
+    ? pass("worker-ledger records result DONE from last_assistant_message")
+    : fail("worker-ledger did not record a parseable row from a real SubagentStop payload",
+           `exit=${r.code} row=${JSON.stringify(row)}`);
+}
+{
+  // Fields confirmed present on a real PreCompact firing: the snapshot on disk named its
+  // trigger, read the transcript, and was keyed by project and session.
+  const pre = JSON.stringify({
+    session_id: "s-3", transcript_path: TRANSCRIPT, cwd: PROJ, hook_event_name: "PreCompact",
+    trigger: "manual", custom_instructions: "",
+  });
+  const r = runHook("compact-state.mjs", pre);
+  const { createHash } = await import("node:crypto");
+  const key = createHash("sha256").update(PROJ).digest("hex").slice(0, 12);
+  const snap = join(tmpdir(), `claude-orchestration-${key}-s-3.md`);
+  const body = existsSync(snap) ? readFileSync(snap, "utf8") : "";
+  r.code === 0 && body.includes("implementer") && body.includes("/repo/src/a.py")
+    ? pass("compact-state snapshots dispatched workers and written files from a real transcript")
+    : fail("compact-state wrote no usable snapshot", `exit=${r.code} bytes=${body.length}`);
+  try { rmSync(snap, { force: true }); } catch {}
+}
+
+// ── 11. Fail-open behaviour ──────────────────────────────────────────────────
+/**
+ * Every hook here sits on an observability surface, so a crash costs the user a broken
+ * session for no benefit. Each is run four ways and must exit 0 every time.
+ */
+section("Fail-open behaviour");
+const HOSTILE = [
+  ["realistic", JSON.stringify({ session_id: "s", transcript_path: TRANSCRIPT, cwd: PROJ, trigger: "manual",
+    tool_name: "Agent", tool_input: { prompt: "x", subagent_type: "implementer" },
+    agent_type: "implementer", last_assistant_message: "## Result\nDONE" })],
+  ["malformed JSON", '{"session_id": "abc'],
+  ["empty stdin", ""],
+  ["missing files", JSON.stringify({ session_id: "s", transcript_path: join(SANDBOX, "nope.jsonl"),
+    cwd: join(SANDBOX, "does-not-exist"), tool_name: "Agent", tool_input: {}, agent_type: "implementer" })],
+];
+for (const f of hookFiles) {
+  const bad = HOSTILE.filter(([, stdin]) => runHook(f, stdin).code !== 0).map(([label]) => label);
+  bad.length
+    ? fail(`${f} exits non-zero on: ${bad.join(", ")}`, "an observability hook must never break a session")
+    : pass(`${f} exits 0 on all four input shapes`);
+}
+try { rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
+
+// ── Summary ──────────────────────────────────────────────────────────────────
+console.log(
+  `\n${failures === 0 ? "PASS" : "FAIL"} — ${checks - failures}/${checks} invariants hold` +
+  (failures ? `, ${failures} failure(s)\n` : "\n")
+);
+process.exit(failures === 0 ? 0 : 1);

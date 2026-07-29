@@ -46,7 +46,7 @@ user/                          → installs into ~/.claude/
     documentation-accuracy.md  verify-against-source rules (loads on docs and markdown)
   hooks/                       five hooks; all fail open, all exit 0 on every path
     session-brief.mjs          SessionStart — version warning, decisions, changelogs, routing
-    packet-check.mjs           SubagentStart — warns a worker when its Task Packet is thin
+    packet-check.mjs           PreToolUse — warns you at dispatch when a Task Packet is thin
     worker-ledger.mjs          SubagentStop — one line per worker completion
     compact-state.mjs          PreCompact — snapshots workers and files before compaction
     verify-reminder.mjs        Stop — reminds when code changed but nothing was verified

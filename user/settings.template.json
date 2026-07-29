@@ -28,9 +28,9 @@
         ]
       }
     ],
-    "SubagentStart": [
+    "PreToolUse": [
       {
-        "matcher": "implementer|fast-implementer|reviewer",
+        "matcher": "Agent",
         "hooks": [
           {
             "type": "command",

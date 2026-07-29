@@ -161,6 +161,55 @@ const DEPRECATED_KEYS = [
   ],
 ];
 
+/**
+ * Hook entries this package once installed and has since moved or retired.
+ *
+ * `DEPRECATED_KEYS` only reaches top-level keys, and the merge concatenates arrays — so a hook
+ * this package moves to a different event would otherwise stay wired at the old event on every
+ * machine that already installed it, forever. Matching is by event plus a substring of the
+ * command, which is specific enough to hit only our own entry: no other package writes a
+ * command containing this repo's hook filename.
+ *
+ * Each row is [event, command substring, why].
+ */
+const DEPRECATED_HOOKS = [
+  [
+    "SubagentStart",
+    "hooks/packet-check.mjs",
+    "the SubagentStart payload carries no prompt text, so the check was inert there; " +
+      "it now runs on PreToolUse where the packet actually exists",
+  ],
+];
+
+/**
+ * Strip retired hook entries out of a merged settings object.
+ *
+ * Removes only the individual hook whose command matches, then drops the group and the event
+ * if that left them empty — an empty `{"hooks":[]}` group is noise that survives forever
+ * otherwise. Any co-located entry belonging to a plugin or to the user is untouched.
+ */
+function removeDeprecatedHooks(settings) {
+  const removed = [];
+  const events = settings && settings.hooks;
+  if (!isPlainObject(events)) return removed;
+
+  for (const [event, substr, why] of DEPRECATED_HOOKS) {
+    const groups = events[event];
+    if (!Array.isArray(groups)) continue;
+
+    for (const group of groups) {
+      if (!group || !Array.isArray(group.hooks)) continue;
+      const keep = group.hooks.filter((h) => !(h && typeof h.command === "string" && h.command.includes(substr)));
+      if (keep.length !== group.hooks.length) removed.push([`hooks.${event} (${substr})`, why]);
+      group.hooks = keep;
+    }
+
+    events[event] = groups.filter((g) => g && Array.isArray(g.hooks) && g.hooks.length > 0);
+    if (events[event].length === 0) delete events[event];
+  }
+  return removed;
+}
+
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
@@ -218,6 +267,9 @@ function installFiles() {
     const to = join(DEST, ...rel.split("/"));
     const incoming = readFileSync(from);
     const incomingHash = sha(incoming);
+    // The manifest records what this package last *wrote*, not what the repo currently holds.
+    // Overwriting it on a skip would erase the only evidence that the installed copy has fallen
+    // behind, and `doctor` would report a permanently stale file as healthy.
     next[rel] = incomingHash;
 
     if (existsSync(to)) {
@@ -230,6 +282,7 @@ function installFiles() {
       const locallyModified = knownHash && knownHash !== currentHash;
       if (locallyModified && !FORCE) {
         console.log(c.yellow(`  skip   ${rel}  (modified locally — rerun with --force to overwrite)`));
+        next[rel] = knownHash;
         skipped++;
         continue;
       }
@@ -303,6 +356,7 @@ function installSettings() {
       retired.push([key, why]);
     }
   }
+  retired.push(...removeDeprecatedHooks(merged));
 
   const before = JSON.stringify(existing);
   const after = JSON.stringify(merged);
@@ -494,7 +548,8 @@ function doDoctor() {
   const manifest = loadManifest();
   const files = walk(SRC).filter((f) => f !== "settings.template.json");
   const stale = [];
-  const localEdits = [];
+  const localEdits = []; // locally modified, still carrying the newest content we wrote
+  const behind = []; // locally modified, and the repo has moved on since we wrote it
   for (const rel of files) {
     const to = join(DEST, ...rel.split("/"));
     if (!existsSync(to)) {
@@ -502,10 +557,18 @@ function doDoctor() {
       continue;
     }
     const installedHash = sha(readFileSync(to));
-    if (installedHash === sha(readFileSync(join(SRC, ...rel.split("/"))))) continue;
+    const repoHash = sha(readFileSync(join(SRC, ...rel.split("/"))));
+    if (installedHash === repoHash) continue;
     const knownHash = manifest.files && manifest.files[rel];
-    if (knownHash && knownHash !== installedHash) localEdits.push(rel);
-    else stale.push(rel);
+    if (!knownHash || knownHash === installedHash) {
+      stale.push(rel);
+      continue;
+    }
+    // `install` skips a locally modified file, so the only thing separating "edited, and
+    // otherwise current" from "edited, and years out of date" is whether the content we last
+    // wrote is still what the repo holds.
+    if (knownHash === repoHash) localEdits.push(rel);
+    else behind.push(rel);
   }
   const detail = [
     stale.length ? `${stale.length} stale: ${stale.slice(0, 5).join(", ")}` : null,
@@ -519,6 +582,20 @@ function doDoctor() {
     "installed files match this repo",
     stale.length === 0,
     detail || `${files.length} files`
+  );
+
+  // A locally edited file is a choice; a locally edited file the package can no longer update
+  // is silent divergence, which is the failure this whole setup exists to prevent. `install`
+  // will skip it on every future run and say so only in passing, so `doctor` has to fail.
+  add(
+    "no locally modified file is behind this repo",
+    behind.length === 0,
+    behind.length
+      ? `${behind.join(", ")} — edited here, and this repo has changed since. ` +
+        `\`install\` skips these, so package updates no longer reach this machine. ` +
+        `Move your additions into ~/.claude/rules/<name>.md, which is loaded automatically ` +
+        `and is not owned by this package, then rerun install (or install --force to discard).`
+      : `${localEdits.length} locally modified file(s), all current`
   );
 
   // 2. Claude Code version against the floor.

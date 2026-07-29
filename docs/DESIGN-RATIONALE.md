@@ -369,14 +369,17 @@ file in place.
 
 ### 8.5 Two mechanisms whose limits are the point
 
-**Task Packet check (`packet-check.mjs`).** The packet's fields are mechanically checkable
-at dispatch, and `SubagentStart` exposes `prompt_text`. It cannot block — the event does not
-permit it — which turned out to be the right shape anyway: `additionalContext` on
-`SubagentStart` reaches the *subagent*, so the warning lands where it converts "invent a
-design" into "return BLOCKED naming the missing field." It is scoped to `implementer`,
-`fast-implementer`, and `reviewer`; `verifier` is exempt because its packet is a command
-list. It says in its own text that it is a warning, not a gate, so a legitimately trivial
-delegation is not punished for brevity.
+**Task Packet check (`packet-check.mjs`).** The packet's fields are mechanically checkable at
+dispatch. It is scoped to `implementer`, `fast-implementer`, and `reviewer`; `verifier` is
+exempt because its packet is a command list. It says in its own text that it is a warning, not
+a gate, so a legitimately trivial delegation is not punished for brevity.
+
+> **Superseded — see §10.1.** This section originally claimed the check ran on `SubagentStart`
+> and read `prompt_text` from that event. No Claude Code release has ever sent that field, so
+> the hook was inert from the day it shipped: it warned on nothing, ever. It now runs on
+> `PreToolUse`. The paragraph is kept rather than rewritten because the reasoning it records —
+> that a warning aimed at the subagent converts "invent a design" into "return BLOCKED" — was
+> sound, and losing it would hide why the replacement is a genuine trade rather than an upgrade.
 
 **Compaction snapshot (`compact-state.mjs`).** `PreCompact` receives `transcript_path`, so a
 hook can capture real state rather than a stub. It records what is deterministic: every
@@ -752,3 +755,157 @@ in place because the user's own agent was still in it, and left `settings.json` 
 exactly the three foreign entries it started with. A second uninstall removed nothing and
 reported nothing to restart. A clean install → uninstall → install round trip returned
 `status` to "In sync with this repo".
+
+## 10. Audit round: three mechanisms that looked right and did nothing
+
+This round began as an independent verification of the previous two, not as new work. Every
+static check in the repository passed, `bootstrap.mjs doctor` reported 8 of 8, and the
+rationale above described a working system. The audit still found one mechanism that had never
+run once, one diagnostic structurally unable to report the failure it was written for, and two
+detectors whose conditions could not fire in practice.
+
+The common thread is worth naming, because it is the thing this package now defends against: a
+check and a defect can be in perfect agreement and both be wrong. Presence was verified;
+behaviour was not.
+
+### 10.1 The Task Packet check never ran (defect)
+
+`packet-check.mjs` read `payload.prompt_text` on `SubagentStart`. Measured against Claude Code
+2.1.220, the entire `SubagentStart` payload is:
+
+```
+session_id, transcript_path, cwd, prompt_id, agent_id, agent_type, hook_event_name
+```
+
+There is no `prompt_text`. The hook took its "nothing to check" exit on every dispatch since it
+shipped, and warned no one. Nothing in the repository could see this: `node --check` passed,
+the JSON parsed, the hook was correctly registered, and it dutifully exited 0. Feeding it a
+hand-written payload containing `prompt_text` — which is how it was originally tested —
+produced a perfect warning, which is precisely how the defect survived.
+
+Recovering the packet from disk at that moment was investigated and does not work. Both
+candidate sources were checked against a live dispatch and neither exists yet when
+`SubagentStart` fires: the per-subagent transcript
+(`<project>/<session>/subagents/agent-<agent_id>.jsonl`) has not been created, and the parent
+transcript has not been flushed with the `Agent` tool_use block. The data is genuinely absent,
+not merely awkward to reach.
+
+`PreToolUse` on the `Agent` tool carries `tool_input.prompt` and `tool_input.subagent_type`
+directly, before the worker starts. That is the only point in the lifecycle where the packet is
+mechanically available, so that is where the check now lives.
+
+**The cost is real and is not hidden.** The warning now reaches the **orchestrator** instead of
+the subagent. The original design's advantage — a worker told its packet is thin returns
+`BLOCKED` instead of inventing a design — is lost. What replaces it is weaker in kind but
+present in fact: the author of the packet is told before the worker spawns, and the author is
+the party who can actually fix it. A warning delivered to the second-best reader beats one
+delivered to nobody.
+
+Two constraints follow from the move, both now enforced by `verify-repo.mjs`:
+
+- **It must never block.** `SubagentStart` could not block; `PreToolUse` can. The field matching
+  is deliberately loose because a packet is prose, and a blocking gate on loose matching produces
+  false denials, which get the hook switched off, which removes the warning too. `permissionDecision`
+  appears nowhere in the hook, and a check asserts it never will.
+- **The event is an invariant.** A regression to `SubagentStart` is a silent return to doing
+  nothing, so it fails the build rather than merely looking odd in a diff.
+
+Existing installs are migrated. The settings merge is additive, so the dead `SubagentStart`
+entry would otherwise sit in every `settings.json` forever. `DEPRECATED_HOOKS` removes it by
+event plus command substring, leaving co-located foreign entries — a plugin's own
+`SubagentStart` hook in the same array — untouched.
+
+### 10.2 `doctor` could not detect a permanently stale file
+
+§8.3.1 records that a locally extended file can never receive package updates: `install` skips
+it and `--force` would discard the local content. What was missed is that `doctor` reports that
+state as **PASS**, forever.
+
+The classification compared the manifest hash against the *installed* hash. Both differ from
+each other whether the installed copy is one release behind or fifty, so a machine running a
+year-old policy file was indistinguishable from one edited five minutes ago. Worse, `install`
+rewrote the manifest entry to the current repo hash even when it had skipped the file, erasing
+the only evidence of what had actually been written.
+
+Two changes make the state visible:
+
+- The manifest now records what this package last **wrote**. On a skip it preserves the previous
+  value instead of overwriting it with content that never reached disk.
+- `doctor` splits "locally modified" into *current* and *behind* by asking whether the content we
+  last wrote is still what the repo holds. Behind **fails**, because a machine silently running
+  superseded policy is the exact divergence this package exists to prevent.
+
+The failure names a remedy that works: move personal additions into `~/.claude/rules/<name>.md`,
+which is loaded automatically and is not owned by this package, then reinstall. Verified across
+the full lifecycle — fresh install, local edit, upstream change, remedy — with `doctor` exiting
+0, 0, 1, 0 and only that check changing.
+
+### 10.3 Two detectors that could not fire
+
+**The ledger's all-null alarm.** `session-brief.mjs` warned when the report contract broke, but
+only if `rows.every(e => !e.result)`. On the live ledger, 5 of 7 rows carried no result and the
+alarm stayed silent, because two rows did. Unanimity is the wrong test: the rows that parse are
+by definition the ones that followed the contract, so a partial breakage — the likely shape — is
+exactly what unanimity misses. It is now a majority test and reports the ratio.
+
+**Verification counted a mention as a run.** `verify-reminder.mjs` matched declared commands with
+`cmd.includes(c)`, so `echo "remember to run make test"` or `grep "make test" Makefile` marked
+the session verified and suppressed the reminder for the rest of it. Matching is now anchored to
+the start of a shell segment, with leading environment assignments stripped so `CI=1 make test`
+still counts. This deliberately trades a silent false pass for a possible noisy false reminder;
+the reminder's own text tells the reader to say so and finish.
+
+**Infrastructure is code.** The same hook's extension list covered 20 languages but not `.sh`,
+`.yml`, `.tf`, or `Dockerfile`, so a session that rewrote only a deploy pipeline was treated as a
+documentation change. Those now count.
+
+### 10.4 The version floor could read the wrong number
+
+`session-brief.mjs` derived the running version from the first path segment matching `x.y.z`.
+On a runtime installed under a bare version directory — `/opt/asdf/installs/nodejs/22.23.1/…` —
+that is the **Node** version. Being far above any plausible floor, it would silence the warning
+on exactly the outdated installs the check exists to catch. The segment is now anchored to a
+literal `versions` parent, and the npm `package.json` walk remains the fallback that resolves
+this machine correctly.
+
+### 10.5 `verify-repo.mjs` now runs the hooks
+
+The script asserted structure and never executed anything, which is why it certified an inert
+hook for two rounds. It now also:
+
+- runs every hook against a payload **captured from a live Claude Code run**, and demands the
+  behaviour that payload should produce — a warning where there should be one, silence where
+  there should not;
+- runs every hook four ways (realistic, malformed JSON, empty stdin, missing files) and requires
+  exit 0 from all of them, since these sit on observability surfaces;
+- checks that every hook file is registered, that every registered command names a file that
+  exists, and that `packet-check.mjs` is wired to an event that can actually feed it.
+
+It is also now committed. It was untracked through both previous rounds, so no clone could run
+the checks the rationale cited as evidence.
+
+### 10.6 Verification performed on this round
+
+- `node verify-repo.mjs --verbose`: **85 of 85**, exit 0.
+- The new checks were **mutation-tested** rather than trusted. Seven deliberate defects were
+  introduced into a scratch copy, one at a time, and each had to be caught: `packet-check` rewired
+  to `SubagentStart`; `packet-check` reverted to reading `prompt_text`; a hook made to exit 1 on
+  malformed input; a registered hook file deleted; `packet-check` made to emit
+  `permissionDecision: "deny"`; the infrastructure extensions removed; and command matching
+  reverted to `includes`. All seven failed the suite. The first pass caught only five, which is
+  why the two `verify-reminder` behaviour checks exist.
+- `SubagentStart`, `Stop`, `PreCompact`, `SubagentStop`, and `PreToolUse` were each confirmed to
+  fire by canary hooks injected through `--settings` against a real headless session, with a
+  `SubagentStop` control in the same run. `PreToolUse` `additionalContext` was confirmed to reach
+  the model, not merely to be emitted.
+- The `Stop` reminder was exercised end to end in a live session: a real code edit with no
+  verification produced `{"offset":29905,"edited":true,"verified":false,"reminded":true}`.
+- Deprecated-hook migration was exercised against a seeded `settings.json` carrying the old
+  `SubagentStart` entry, a foreign plugin hook in the same array, a foreign `PreToolUse` entry,
+  `statusLine`, and `enabledPlugins`. Only our own entry was removed; everything else survived.
+- `doctor`'s behind-detection was exercised across the full lifecycle described in §10.2.
+- Two measurement errors are worth recording, because each briefly produced a confident wrong
+  answer. macOS resolves `/tmp` to `/private/tmp`, so a marker keyed by project hash appeared
+  absent when it existed under the resolved path; and `timeout` does not exist on macOS, which
+  silently voided a probe. Both were caught only because a control run was included — the same
+  lesson §8.6 records, learned again.

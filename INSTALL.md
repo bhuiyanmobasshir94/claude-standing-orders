@@ -82,7 +82,7 @@ still runs.
 | Hook | Event | What it does | Silent when |
 | --- | --- | --- | --- |
 | `session-brief.mjs` | SessionStart | Warns if Claude Code is below the version floor; injects standing decisions, recent changelogs, and a worker routing signal | the repo has no continuity files and the version is fine |
-| `packet-check.mjs` | SubagentStart | Tells a worker which Task Packet fields its dispatch omitted | the packet is complete, or the worker is `verifier` |
+| `packet-check.mjs` | PreToolUse (`Agent`) | Tells you, at dispatch, which Task Packet fields the delegation omitted | the packet is complete, the target is `verifier`, or the agent is not one of this package's workers |
 | `worker-ledger.mjs` | SubagentStop | Appends one metadata line per worker completion | the subagent is a built-in read-only one |
 | `compact-state.mjs` | PreCompact | Snapshots dispatched workers and files written, so compaction does not erase the integration picture | no workers ran and nothing was written |
 | `verify-reminder.mjs` | Stop | Reminds you when code changed but no declared verification command ran | **always, unless a project sets `verifyCommands`** |

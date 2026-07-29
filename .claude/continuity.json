@@ -1,0 +1,11 @@
+{
+  "_comment": [
+    "Read by session-brief.mjs and verify-reminder.mjs. This repository ships both hooks, so",
+    "it declares its own verification commands rather than being the one project that never",
+    "exercises them. Without verifyCommands the Stop reminder is completely inert.",
+    "",
+    "No changelogDir or decisionFile is declared: this repo deliberately keeps neither, for the",
+    "reasons in CLAUDE.md. Their absence is correct here and is not a gap to fill."
+  ],
+  "verifyCommands": ["node verify-repo.mjs", "node bootstrap.mjs doctor"]
+}

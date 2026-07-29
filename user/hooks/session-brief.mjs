@@ -217,8 +217,16 @@ function claudeVersion() {
   if (!exec) return null;
 
   // Native installer layout: .../claude/versions/2.1.220/...
-  const seg = exec.split(/[\\/]/).find((s) => /^\d+\.\d+\.\d+$/.test(s));
-  if (seg) return seg;
+  //
+  // The version segment is anchored to a literal `versions` parent rather than taken as the
+  // first x.y.z-looking directory anywhere on the path. Unanchored, a runtime installed under
+  // a bare version directory — `/opt/asdf/installs/nodejs/22.23.1/lib/node_modules/...` — hands
+  // back the *Node* version as though it were Claude Code's. That number is far above any
+  // plausible floor, so the check would silently pass on exactly the outdated installs it
+  // exists to catch. Failing to detect is the dangerous direction here.
+  const parts = exec.split(/[\\/]/);
+  const vi = parts.lastIndexOf("versions");
+  if (vi !== -1 && /^\d+\.\d+\.\d+$/.test(parts[vi + 1] || "")) return parts[vi + 1];
 
   // npm layout: .../@anthropic-ai/claude-code/bin/claude.exe — walk up to the package root.
   let dir = dirname(exec);
@@ -319,9 +327,15 @@ function ledger(root) {
   // Silence here means the report contract or the ledger hook is broken, not that every
   // worker succeeded. Exactly this failure hid behind a wrong payload key for every row
   // the ledger had ever written; the rollup is required to notice it out loud.
-  if (rows.length >= 5 && rows.every((e) => !e.result)) {
+  //
+  // The test is a majority, not unanimity. Requiring *every* row to be blank meant a single
+  // well-formed report masked a window that was otherwise entirely unusable — and since the
+  // rows that do parse are the ones that followed the contract, that is the likely shape of a
+  // real breakage, not an unlikely one.
+  const unparsed = rows.filter((e) => !e.result).length;
+  if (rows.length >= 5 && unparsed > rows.length / 2) {
     out.push(
-      "- No worker reported a `## Result` line across the whole window — the report " +
+      `- ${unparsed} of ${rows.length} workers reported no \`## Result\` line — the report ` +
         "contract or the ledger hook is not working. Run `node bootstrap.mjs doctor`."
     );
   }

@@ -63,8 +63,9 @@ those cannot:
   artifact(s) required (tests, changelog entry, migration).
 
 A worker that has to guess at any of these should return `BLOCKED` rather than invent a
-design; a `SubagentStart` hook warns it when a field is missing. The full contract lives in
-the `worker-contract` skill, preloaded into every worker.
+design; a `PreToolUse` hook on the `Agent` tool warns **you** at dispatch when a field is
+missing, before the worker starts. It never blocks. The full contract lives in the
+`worker-contract` skill, preloaded into every worker.
 
 ## Parallelism
 

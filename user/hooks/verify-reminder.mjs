@@ -33,9 +33,48 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 
-/** Extensions that make a write count as "changed code" worth verifying. */
-const CODE_RE = /\.(m?[jt]sx?|py|rb|go|rs|java|kt|swift|php|cs|scala|ex|exs|c|h|cc|cpp|sql)$/i;
+/**
+ * Writes that count as "changed code" worth verifying.
+ *
+ * Infrastructure counts. A session that rewrites only a CI workflow, a Terraform module, a
+ * shell script, or a Dockerfile has changed what runs in production every bit as much as one
+ * that edits a `.py`, and treating those as documentation meant the reminder stayed silent on
+ * exactly the changes hardest to undo.
+ */
+const CODE_RE =
+  /\.(m?[jt]sx?|py|rb|go|rs|java|kt|swift|php|cs|scala|ex|exs|c|h|cc|cpp|sql|sh|bash|zsh|ya?ml|tf|tfvars|proto|gradle|rake)$/i;
+/** Extensionless files whose basename alone marks them as build or deploy inputs. */
+const CODE_BASENAMES = /^(dockerfile|makefile|justfile|rakefile|procfile|jenkinsfile)$/i;
 const WRITE_TOOLS = ["Edit", "Write", "NotebookEdit"];
+
+/** A path counts when either its extension or its bare filename says it is code. */
+function isCodePath(p) {
+  if (CODE_RE.test(p)) return true;
+  const base = p.split(/[\\/]/).pop() || "";
+  return CODE_BASENAMES.test(base);
+}
+
+/**
+ * Did this Bash invocation actually *run* one of the declared verification commands?
+ *
+ * A plain substring test answers yes to `echo "remember to run make test"` and to
+ * `grep "make test" Makefile`, which silently suppresses the reminder for the rest of the
+ * session. So the command must begin a shell segment: the string is split on the separators
+ * that start a new command, leading environment assignments are stripped, and the declared
+ * command has to sit at the front of what remains.
+ *
+ * This trades one error for the other on purpose. It can miss an unusual invocation and remind
+ * a session that did verify — mild noise, and the reminder's own text tells the reader to say
+ * so and finish. The failure it removes is worse and invisible: silence that reads as proof.
+ */
+function ranVerification(cmd, commands) {
+  const segments = String(cmd).split(/\n|;|&&|\|\||\|/);
+  for (const segment of segments) {
+    const cleaned = segment.trim().replace(/^(?:[A-Za-z_][\w]*=\S*\s+)*/, "");
+    if (commands.some((c) => cleaned.startsWith(c))) return true;
+  }
+  return false;
+}
 
 function readStdinSync() {
   try {
@@ -96,10 +135,10 @@ function scan(text, commands, state) {
       if (!b || b.type !== "tool_use") continue;
       if (WRITE_TOOLS.includes(b.name)) {
         const p = b.input && b.input.file_path;
-        if (typeof p === "string" && CODE_RE.test(p)) state.edited = true;
+        if (typeof p === "string" && isCodePath(p)) state.edited = true;
       } else if (b.name === "Bash") {
         const cmd = String((b.input && b.input.command) || "");
-        if (commands.some((c) => cmd.includes(c))) state.verified = true;
+        if (ranVerification(cmd, commands)) state.verified = true;
       } else if (b.name === "Agent") {
         // A verifier run is verification, whoever typed the command.
         if ((b.input && b.input.subagent_type) === "verifier") state.verified = true;

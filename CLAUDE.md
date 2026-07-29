@@ -43,11 +43,16 @@ own practice, it is product — leave it.
   `__CLAUDE_HOME__`; `bootstrap.mjs` resolves it per machine.
 - **Observability hooks fail open.** `session-brief.mjs`, `worker-ledger.mjs`,
   `packet-check.mjs`, `compact-state.mjs`, and `verify-reminder.mjs` must exit 0 on every
-  path, including malformed input. There is no authorization boundary among them:
-  `packet-check.mjs` warns and cannot block (`SubagentStart` does not allow it), and
-  `compact-state.mjs` and `verify-reminder.mjs` must never block, even though `PreCompact`
-  and `Stop` would both permit it. `verify-reminder.mjs` is additionally inert unless a
-  project opts in via `verifyCommands` — it must never infer verification commands.
+  path, including malformed input. There is no authorization boundary among them, and none
+  of them may block even where the event would allow it: `packet-check.mjs` runs on
+  `PreToolUse` and must never emit `permissionDecision: "deny"`, and `compact-state.mjs` and
+  `verify-reminder.mjs` must never block, though `PreCompact` and `Stop` both permit it.
+  `verify-reminder.mjs` is additionally inert unless a project opts in via `verifyCommands`
+  — it must never infer verification commands.
+- **A hook is not verified until its real payload has been seen.** `packet-check.mjs` shipped
+  reading a `prompt_text` field that no Claude Code release ever sent, and every static check
+  in this repo passed while it did nothing. Exercise a hook against a payload captured from a
+  live run — `verify-repo.mjs` pins the fields each one depends on for exactly this reason.
 - **`Stop` fires every assistant turn, not once per session.** Anything hooked there scans
   incrementally from a saved offset and short-circuits before doing real work.
 - **No subprocess on the session-start path.** `session-brief.mjs` derives the Claude Code
