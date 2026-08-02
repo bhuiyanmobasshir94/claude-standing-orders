@@ -134,6 +134,22 @@ or public API shape.
 - **No speculative abstractions** and no new dependencies for hypothetical needs — and no
   cutting the standards above to keep a change small.
 
+## Context discipline
+
+Everything resident in context is re-sent, and re-billed, on every subsequent turn — context
+size is a running cost, not a fixed one, and it only grows in one direction within a session.
+
+- **Long sessions are the expensive failure mode.** Compact, or start a fresh session at a
+  natural boundary, rather than letting one session run indefinitely; the brief at session
+  start reports the previous session's peak context size in this project for exactly this
+  reason.
+- **Exploratory reading belongs in a subagent.** Locating code, scanning logs, and inspecting
+  screenshots — dispatch it to `Explore` (see "How to operate" above) so the raw output lands
+  in that subagent's context, not the main thread's, and is never paid for on a later turn.
+- **Prefer bounded reads.** `offset`/`limit` and `Grep` over reading a whole large file into
+  the main thread; a large file read once at full size is still resident, and still re-billed,
+  for the rest of the session.
+
 ## Notes
 
 - Main-thread model and effort come from `~/.claude/settings.json` (`model: opus`,
