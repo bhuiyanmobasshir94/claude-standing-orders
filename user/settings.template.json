@@ -38,6 +38,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__CLAUDE_HOME__/hooks/big-read-guard.mjs\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SubagentStop": [
@@ -70,6 +80,15 @@
           {
             "type": "command",
             "command": "node \"__CLAUDE_HOME__/hooks/verify-reminder.mjs\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"__CLAUDE_HOME__/hooks/context-cost.mjs\"",
             "timeout": 10
           }
         ]

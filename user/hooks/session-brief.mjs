@@ -10,7 +10,8 @@
  *     features are silently inactive;
  *   - the orchestration snapshot `compact-state.mjs` wrote before the last compaction;
  *   - the repository's standing decisions and recent session changelogs;
- *   - a rollup of the worker ledger as a routing signal.
+ *   - a rollup of the worker ledger as a routing signal;
+ *   - the previous session's peak context size in this project, as a cost signal.
  *
  * Locations are discovered, not assumed. In order of precedence:
  *
@@ -30,7 +31,9 @@
  * a brief that cannot be produced must never block a session. Every failure path exits 0.
  */
 
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import {
+  readFileSync, readdirSync, existsSync, statSync, openSync, readSync, closeSync,
+} from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -65,6 +68,15 @@ const MAX_TOTAL_CHARS = 8000;
 
 /** How many ledger rows the routing rollup considers. Older runs are not evidence today. */
 const LEDGER_WINDOW = 40;
+
+/**
+ * Tail size read when looking for the previous session's peak context usage. Transcripts
+ * can run to hundreds of megabytes; only the most recent activity is worth the read.
+ */
+const CONTEXT_TAIL_BYTES = 64 * 1024;
+
+/** Above this, a session is re-billing enough context per turn that the brief calls it out. */
+const CONTEXT_WARN_TOKENS = 200_000;
 
 /**
  * Read the entire hook payload from stdin synchronously.
@@ -459,12 +471,158 @@ function handoff(payload, root) {
 }
 
 /**
+ * Locate the most recently modified transcript for this project, excluding the current
+ * session's own file.
+ *
+ * Transcripts for a project live alongside each other on disk, one file per session; the
+ * current session's own path is given directly in the payload, so its directory is used
+ * rather than re-deriving a project key from scratch.
+ *
+ * @param {object} payload - The parsed SessionStart hook payload; reads
+ *   `payload.transcript_path` and `payload.session_id`.
+ * @returns {string|null} Absolute path to the previous session's transcript, or null when
+ *   the current transcript path is unknown, its directory cannot be listed, or no other
+ *   transcript exists there.
+ */
+function previousTranscriptPath(payload) {
+  const current =
+    payload && typeof payload.transcript_path === "string" ? payload.transcript_path : null;
+  if (!current) return null;
+
+  const dir = dirname(current);
+  const currentName = current.split(/[\\/]/).pop();
+
+  let names;
+  try {
+    names = readdirSync(dir).filter(
+      (n) => n.toLowerCase().endsWith(".jsonl") && n !== currentName
+    );
+  } catch {
+    return null;
+  }
+  if (!names.length) return null;
+
+  let best = null;
+  let bestMtime = -1;
+  for (const n of names) {
+    try {
+      const mtime = statSync(join(dir, n)).mtimeMs;
+      if (mtime > bestMtime) {
+        bestMtime = mtime;
+        best = join(dir, n);
+      }
+    } catch {
+      /* an entry that vanished mid-scan is simply skipped */
+    }
+  }
+  return best;
+}
+
+/**
+ * Read only the last `maxBytes` of a file, dropping a leading partial line when the read
+ * did not start at byte 0.
+ *
+ * Same bounded-read technique as `readFrom` in verify-reminder.mjs, applied to a file's tail
+ * instead of a saved offset: transcripts can run to hundreds of megabytes, and this hook
+ * only ever needs the most recent activity.
+ *
+ * @param {string} path - Absolute path to the file to read.
+ * @param {number} maxBytes - Maximum number of trailing bytes to read.
+ * @returns {string} The trailing text, or `""` on any read failure.
+ */
+function readTail(path, maxBytes) {
+  try {
+    const size = statSync(path).size;
+    const start = Math.max(0, size - maxBytes);
+    const fd = openSync(path, "r");
+    let text;
+    try {
+      const len = size - start;
+      const buf = Buffer.allocUnsafe(len);
+      const read = readSync(fd, buf, 0, len, start);
+      text = buf.subarray(0, read).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+    if (start > 0) {
+      // The read did not start at byte 0, so its first line is very likely a partial JSON
+      // object cut off by the tail boundary rather than a real record.
+      const nl = text.indexOf("\n");
+      text = nl === -1 ? "" : text.slice(nl + 1);
+    }
+    return text;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Find the largest context size seen in a transcript's tail.
+ *
+ * @param {string} path - Absolute path to a transcript JSONL file.
+ * @returns {number|null} The largest `input_tokens + cache_creation_input_tokens +
+ *   cache_read_input_tokens` found in any `message.usage` block in the tail, or null when
+ *   the tail has no parseable usage.
+ */
+function peakContextTokens(path) {
+  const text = readTail(path, CONTEXT_TAIL_BYTES);
+  let peak = 0;
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const usage = entry && entry.message && entry.message.usage;
+    if (!usage || typeof usage !== "object") continue;
+    const total =
+      (Number(usage.input_tokens) || 0) +
+      (Number(usage.cache_creation_input_tokens) || 0) +
+      (Number(usage.cache_read_input_tokens) || 0);
+    if (total > peak) peak = total;
+  }
+  return peak > 0 ? peak : null;
+}
+
+/**
+ * Report how large the previous session in this project grew, as a cost signal for this one.
+ *
+ * @param {object} payload - The parsed SessionStart hook payload, passed through to
+ *   `previousTranscriptPath`.
+ * @returns {string|null} A one- or two-sentence Markdown line naming the previous session's
+ *   peak context size, or null when there is no prior transcript or nothing parses.
+ */
+function previousSessionContext(payload) {
+  try {
+    const path = previousTranscriptPath(payload);
+    if (!path) return null;
+    const peak = peakContextTokens(path);
+    if (!peak) return null;
+
+    let line =
+      `The previous session in this project peaked at ~${peak.toLocaleString()} context tokens.`;
+    if (peak > CONTEXT_WARN_TOKENS) {
+      line +=
+        " A session that large re-bills its whole context on every turn — compacting or " +
+        "splitting earlier is cheaper.";
+    }
+    return line;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Assemble the full session continuity brief from all sources, capped to a total size.
  *
  * @param {string} root - Absolute path to the project root.
- * @param {object} payload - The parsed SessionStart hook payload, passed through to `handoff`.
+ * @param {object} payload - The parsed SessionStart hook payload, passed through to
+ *   `handoff` and `previousSessionContext`.
  * @returns {string|null} The brief as Markdown, or null when there is nothing worth
- *   surfacing (no version warning, no decisions, no changelogs, no ledger signal, no handoff).
+ *   surfacing (no version warning, no decisions, no changelogs, no ledger signal, no
+ *   handoff, no previous-session context size).
  */
 function build(root, payload) {
   const cfg = config(root);
@@ -472,6 +630,7 @@ function build(root, payload) {
   const dec = decisions(root, cfg);
   const { label: clLabel, entries } = changelogs(root, cfg);
   const led = ledger(root);
+  const ctx = previousSessionContext(payload);
 
   let carried = null;
   const handoffPath = handoff(payload, root);
@@ -484,7 +643,7 @@ function build(root, payload) {
     }
   }
 
-  if (!warn && !dec && entries.length === 0 && led.length === 0 && !carried) return null;
+  if (!warn && !dec && entries.length === 0 && led.length === 0 && !carried && !ctx) return null;
 
   const parts = [
     "# Session continuity brief",
@@ -508,6 +667,8 @@ function build(root, payload) {
   if (led.length) {
     parts.push(`\n## Worker routing signal (last ${LEDGER_WINDOW} runs)\n\n${led.join("\n")}`);
   }
+
+  if (ctx) parts.push(`\n## Previous session context size\n\n${ctx}`);
 
   let text = parts.join("\n");
   if (text.length > MAX_TOTAL_CHARS) {

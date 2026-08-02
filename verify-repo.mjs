@@ -614,6 +614,86 @@ const preToolUsePayload = (prompt, subagent_type = "implementer") => JSON.string
     : fail("compact-state wrote no usable snapshot", `exit=${r.code} bytes=${body.length}`);
   try { rmSync(snap, { force: true }); } catch {}
 }
+{
+  // Fields confirmed present on a real PreToolUse/Read firing. The guard reads only
+  // `tool_input.file_path`, `offset`, and `limit` — it never opens the file, because reading
+  // it to warn about the cost of reading it would spend exactly what it exists to save.
+  const readPayload = (tool_input) => JSON.stringify({
+    session_id: "s-br", transcript_path: TRANSCRIPT, cwd: PROJ, permission_mode: "default",
+    hook_event_name: "PreToolUse", tool_name: "Read", tool_input, tool_use_id: "toolu_1",
+  });
+
+  const bigText = join(SANDBOX, "big.txt");
+  writeFileSync(bigText, "x".repeat(60000));
+  const r = runHook("big-read-guard.mjs", readPayload({ file_path: bigText }));
+  r.code === 0 && r.out.includes("15,000") && !/permissionDecision|updatedInput/.test(r.out)
+    ? pass("big-read-guard warns on a large unbounded Read, quoting a token estimate, and never blocks")
+    : fail("big-read-guard did not warn usably on a large unbounded Read",
+           `exit=${r.code} out=${r.out.slice(0, 200)}`);
+
+  const bounded = runHook("big-read-guard.mjs", readPayload({ file_path: bigText, offset: 10, limit: 50 }));
+  bounded.code === 0 && bounded.out.trim() === ""
+    ? pass("big-read-guard stays silent on a bounded Read")
+    : fail("big-read-guard warned on a bounded Read — false positive", bounded.out.slice(0, 200));
+
+  // An image is tokenized by pixel dimensions, so a bytes/4 figure would be a fabricated
+  // number. The guard must warn without quoting one.
+  const img = join(SANDBOX, "big.png");
+  writeFileSync(img, "x".repeat(60000));
+  const ri = runHook("big-read-guard.mjs", readPayload({ file_path: img }));
+  ri.code === 0 && /pixel dimensions/.test(ri.out) && !ri.out.includes("15,000")
+    ? pass("big-read-guard warns on a large image without quoting a byte-derived token estimate")
+    : fail("big-read-guard quoted a bytes/4 estimate for an image, or failed to warn it at all",
+           ri.out.slice(0, 200));
+}
+{
+  // Fields confirmed present on a real Stop firing. Context size for a turn is
+  // input_tokens + cache_creation_input_tokens + cache_read_input_tokens.
+  const usageLine = (cacheRead) => JSON.stringify({
+    type: "assistant", timestamp: "2026-01-01T00:00:00.000Z",
+    message: { usage: {
+      input_tokens: 10, cache_creation_input_tokens: 1000, cache_read_input_tokens: cacheRead,
+    } },
+  });
+  const stopPayload = (session_id, transcript_path) => JSON.stringify({
+    session_id, transcript_path, cwd: PROJ, hook_event_name: "Stop",
+    stop_hook_active: false, last_assistant_message: "done",
+  });
+  const { createHash: hash } = await import("node:crypto");
+  const ctxKey = hash("sha256").update(PROJ).digest("hex").slice(0, 12);
+  const marker = (id) => join(tmpdir(), `claude-context-cost-${ctxKey}-${id}.json`);
+
+  const over = join(SANDBOX, "ctx-over.jsonl");
+  writeFileSync(over, usageLine(250000) + "\n");
+  const r = runHook("context-cost.mjs", stopPayload("s-ctx-1", over));
+  r.code === 0 && r.out.includes("251,010") && !/"decision"/.test(r.out)
+    ? pass("context-cost warns on a real Stop payload once context crosses the threshold, and never blocks")
+    : fail("context-cost did not warn on an over-threshold transcript",
+           `exit=${r.code} out=${r.out.slice(0, 200)}`);
+
+  const under = join(SANDBOX, "ctx-under.jsonl");
+  writeFileSync(under, usageLine(4000) + "\n");
+  const ru = runHook("context-cost.mjs", stopPayload("s-ctx-2", under));
+  ru.code === 0 && ru.out.trim() === ""
+    ? pass("context-cost stays silent below the threshold")
+    : fail("context-cost warned below the threshold — false positive", ru.out.slice(0, 200));
+
+  // Regression pin: the hook must read the CURRENT context, not the session's high-water
+  // mark. Tracking the peak meant a session that crossed a threshold and then compacted kept
+  // being warned about a cost it had already paid down, and the message called a stale peak
+  // "now" — a false positive that teaches the reader to ignore the hook.
+  const compacted = join(SANDBOX, "ctx-compacted.jsonl");
+  writeFileSync(compacted, usageLine(250000) + "\n" + usageLine(3000) + "\n");
+  const rc = runHook("context-cost.mjs", stopPayload("s-ctx-3", compacted));
+  rc.code === 0 && rc.out.trim() === ""
+    ? pass("context-cost reports current context, not peak — a compacted session is not warned")
+    : fail("context-cost warned a session that had already compacted below the threshold",
+           rc.out.slice(0, 200));
+
+  for (const id of ["s-ctx-1", "s-ctx-2", "s-ctx-3"]) {
+    try { rmSync(marker(id), { force: true }); } catch {}
+  }
+}
 
 // ── 11. Fail-open behaviour ──────────────────────────────────────────────────
 /**

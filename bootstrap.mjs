@@ -750,7 +750,7 @@ function doDoctor() {
     for (const cmd of scripts) {
       const match = String(cmd || "").match(/"([^"]+\.(?:mjs|js|sh|py))"|(\S+\.(?:mjs|js|sh|py))/);
       const p = match && (match[1] || match[2]);
-      if (!p) continue; // e.g. `rtk hook claude` — a PATH lookup, not a file we can check
+      if (!p) continue; // a bare command resolved off PATH, not a file this check can stat
       hookCount++;
       if (existsSync(p)) resolved.push(p);
       else badHooks.push(p);
