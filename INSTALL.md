@@ -57,10 +57,10 @@ Once B is done, this is a single command inside any repository:
 /orchestration-onboard
 ```
 
-Pass the path if your clone is not at `~/dev/claude-orchestrator`:
+Pass the path if your clone is not at `~/dev/claude-standing-orders`:
 
 ```
-/orchestration-onboard ~/code/claude-orchestrator
+/orchestration-onboard ~/code/claude-standing-orders
 ```
 
 It explores the codebase, asks you only for what the code cannot reveal, shows you the

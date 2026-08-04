@@ -1,4 +1,4 @@
-# claude-orchestrator
+# claude-standing-orders
 
 This repository **is** the orchestrator–worker package. `user/` installs into `~/.claude/`
 on every machine, so a change here changes how Claude Code behaves everywhere the package

@@ -2,14 +2,14 @@
 name: orchestration-onboard
 description: Set up the current repository for the orchestrator-worker workflow - project CLAUDE.md, path-scoped rules, continuity directories, and permission settings - by reading the codebase first and proposing a plan before writing anything.
 disable-model-invocation: true
-argument-hint: "[path to the orchestrator repo, if not ~/dev/claude-orchestrator]"
+argument-hint: "[path to the standing-orders repo, if not ~/dev/claude-standing-orders]"
 ---
 
 # Onboard this repository
 
 Set up the repository in the current working directory for the orchestrator–worker
-workflow. Template files live in the orchestrator repo — use `$ARGUMENTS` as its path if
-given, otherwise try `~/dev/claude-orchestrator`, and ask if neither exists.
+workflow. Template files live in the standing-orders repo — use `$ARGUMENTS` as its path if
+given, otherwise try `~/dev/claude-standing-orders`, and ask if neither exists.
 
 **Write nothing until step 4 is approved.** This skill produces a plan first.
 

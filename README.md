@@ -1,11 +1,36 @@
-# Orchestrator–worker setup for Claude Code
+# Standing orders for Claude Code
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 
-One repository that produces an identical orchestrator–worker workflow on every machine —
-Mac, Windows, Linux, or a server. Verified against the Claude Code documentation on
-29 July 2026.
+A standing instruction set that applies to every project and every session on a machine.
+Claude Code keeps investigation and design on the main thread, hands implementation to
+cheaper workers under a written contract, and treats *it passes* as a claim that has to
+arrive with the command and its output attached.
+
+One repository, one Node installer, the same behaviour on macOS, Windows, Linux, and a
+server you SSH into. Verified against the Claude Code documentation on 29 July 2026.
+
+**This is policy you install, not a framework you run.** No runtime, no daemon, no SDK,
+nothing to import, and no wrapper around the CLI. `bootstrap.mjs` writes a `CLAUDE.md`,
+four agent definitions, two skills, two rules, and seven hooks into `~/.claude/`, merges
+what it needs into your existing `settings.json` rather than replacing it, and then gets
+out of the way — after which Claude Code behaves this way everywhere, including in
+repositories that have never heard of this one.
+
+## Who it is for
+
+Codebases where being wrong is expensive and someone eventually asks how a change was
+made: money, migrations, PII, auth, anything that gets audited. The habits that follow
+from working on them — read the real diff rather than the summary of it, run the real
+command, write down the decision so the next session does not re-litigate it — are the
+ones this package makes structural instead of aspirational.
+`examples/django-celery-ses-banking/` is a worked project layer for that kind of
+repository, and `project-template/rules/` carries the security, migration, and
+reliability rules it builds on.
+
+None of it is domain-specific, so it works on an ordinary application repo too. On a
+weekend project it will feel like overhead, and it is.
 
 ## Requirements
 
@@ -18,8 +43,8 @@ Mac, Windows, Linux, or a server. Verified against the Claude Code documentation
 ## Quick start
 
 ```bash
-git clone https://github.com/bhuiyanmobasshir94/claude-orchestrator claude-orchestrator
-cd claude-orchestrator
+git clone https://github.com/bhuiyanmobasshir94/claude-standing-orders
+cd claude-standing-orders
 node bootstrap.mjs install
 node bootstrap.mjs doctor      # confirm this machine can actually run it
 ```
