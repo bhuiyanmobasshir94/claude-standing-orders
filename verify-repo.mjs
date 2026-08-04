@@ -13,7 +13,7 @@
  */
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
-import { join, relative, basename } from "node:path";
+import { join, relative, basename, delimiter } from "node:path";
 import { execFileSync } from "node:child_process";
 
 const ROOT = process.cwd();
@@ -418,7 +418,7 @@ if (!packetWiring.length) {
  * sets from Claude Code 2.1.220 — when a fixture stops matching reality, this is meant to fail.
  */
 section("Payload contracts");
-const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = await import("node:fs");
+const { mkdtempSync, writeFileSync, mkdirSync, rmSync, chmodSync } = await import("node:fs");
 const { tmpdir } = await import("node:os");
 
 const SANDBOX = mkdtempSync(join(tmpdir(), "verify-repo-"));
@@ -716,6 +716,73 @@ for (const f of hookFiles) {
     ? fail(`${f} exits non-zero on: ${bad.join(", ")}`, "an observability hook must never break a session")
     : pass(`${f} exits 0 on all four input shapes`);
 }
+
+// ── 12. Installer behaviour ──────────────────────────────────────────────────
+/**
+ * Runs `bootstrap.mjs` for real against a throwaway config dir. The sections above only
+ * `node --check` it, which is how an unconditional Windows failure in `doctor` survived:
+ * `claude` is an npm shim there, and execFile resolves it only through a shell.
+ *
+ * The stub `claude` keeps this runnable without a Claude Code install, and so in CI.
+ */
+section("Installer behaviour");
+{
+  const CFG = join(SANDBOX, "cfg");
+  const BIN = join(SANDBOX, "bin");
+  const EMPTY = join(SANDBOX, "empty-bin");
+  mkdirSync(BIN, { recursive: true });
+  mkdirSync(EMPTY, { recursive: true });
+
+  const SHIM_VERSION = "9.9.9"; // above any real floor
+  const isWin = process.platform === "win32";
+  const shim = join(BIN, isWin ? "claude.cmd" : "claude");
+  writeFileSync(shim, isWin
+    ? `@echo off\r\necho ${SHIM_VERSION} (Claude Code)\r\n`
+    : `#!/bin/sh\necho "${SHIM_VERSION} (Claude Code)"\n`);
+  if (!isWin) chmodSync(shim, 0o755);
+
+  // Windows spells it `Path`; a second `PATH` key would leave the child's real one intact.
+  const PATH_KEY = Object.keys(process.env).find((k) => k.toUpperCase() === "PATH") || "PATH";
+
+  /**
+   * @param {string[]} args - CLI arguments, e.g. `["doctor", "--home=/tmp/cfg"]`.
+   * @param {object} [env] - Extra environment merged over `process.env`.
+   * @returns {{code: number, out: string}} exit code and stdout with ANSI stripped; a
+   *   non-zero exit still returns its output, since `doctor` reports on the way to exit 1.
+   */
+  function runBootstrap(args, env = {}) {
+    const plain = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, "");
+    try {
+      const out = execFileSync(process.execPath, [join(ROOT, "bootstrap.mjs"), ...args], {
+        encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], cwd: SANDBOX,
+        env: { ...process.env, ...env }, timeout: 60000,
+      });
+      return { code: 0, out: plain(out) };
+    } catch (e) {
+      return { code: e.status === undefined ? 1 : e.status, out: plain(e.stdout || "") };
+    }
+  }
+
+  const inst = runBootstrap(["install", `--home=${CFG}`]);
+  inst.code === 0
+    ? pass("bootstrap install completes against a fresh config dir")
+    : fail("bootstrap install failed on a fresh config dir", `exit=${inst.code} ${inst.out.slice(-300)}`);
+
+  const doc = runBootstrap(["doctor", `--home=${CFG}`],
+    { [PATH_KEY]: BIN + delimiter + (process.env[PATH_KEY] || "") });
+  doc.out.includes(SHIM_VERSION) && !doc.out.includes("is claude on PATH?")
+    ? pass("doctor resolves `claude` on PATH and reports its version")
+    : fail("doctor could not run `claude --version` with claude on PATH",
+           `exit=${doc.code} — execFile resolves neither PATHEXT nor claude.cmd. ` +
+           `out=${doc.out.slice(-300)}`);
+
+  // Negative control: the check above must not be satisfiable by a probe that never looks.
+  const gone = runBootstrap(["doctor", `--home=${CFG}`], { [PATH_KEY]: EMPTY });
+  gone.out.includes("is claude on PATH?")
+    ? pass("doctor still reports an unresolvable `claude` rather than passing silently")
+    : fail("doctor did not flag a missing claude", gone.out.slice(-300));
+}
+
 try { rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
 
 // ── Summary ──────────────────────────────────────────────────────────────────

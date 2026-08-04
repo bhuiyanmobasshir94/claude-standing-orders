@@ -546,7 +546,13 @@ function cmpVersion(a, b) {
  */
 function claudeVersion() {
   try {
-    const out = execFileSync("claude", ["--version"], { encoding: "utf8", timeout: 20000 });
+    const out = execFileSync("claude", ["--version"], {
+      encoding: "utf8",
+      timeout: 20000,
+      // `claude` is an npm shim (claude.cmd) on Windows, which execFile resolves only through
+      // a shell. The argument list is a literal, so this adds no injection surface.
+      shell: process.platform === "win32",
+    });
     return (out.match(/(\d+\.\d+\.\d+)/) || [])[1] || null;
   } catch {
     return null;
