@@ -1,0 +1,35 @@
+# The package claims cross-platform parity but has only ever been verified on macOS.
+# This matrix exercises the verification script on the documented floor (Node 18)
+# and a current release (Node 22) across all three platforms.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [18, 22]
+    name: verify on ${{ matrix.os }} with Node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Verify repository invariants
+        run: node verify-repo.mjs
