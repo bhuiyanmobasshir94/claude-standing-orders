@@ -909,3 +909,66 @@ the checks the rationale cited as evidence.
   absent when it existed under the resolved path; and `timeout` does not exist on macOS, which
   silently voided a probe. Both were caught only because a control run was included — the same
   lesson §8.6 records, learned again.
+
+## 11. `doctor` had never passed on Windows
+
+### 11.1 The defect
+
+`claudeVersion()` ran `execFileSync("claude", ["--version"])`. On Windows, `claude` is an npm
+shim — `claude.cmd` — and Node's `execFile` resolves neither `PATHEXT` nor the shim itself, so
+the call raised `ENOENT` regardless of whether Claude Code was installed. `claudeVersion()`
+returned `null`, and `doctor` reported:
+
+```
+FAIL  Claude Code >= 2.1.219
+      `claude --version` did not run — is claude on PATH?
+```
+
+about a `claude` that was on `PATH` and answered correctly when invoked through a shell. The
+check could not pass on Windows under any configuration, so `doctor` exited 1 on every Windows
+install this package has had, and `README.md` and `INSTALL.md` both instruct the reader to treat
+a non-zero `doctor` as a broken install.
+
+The fix passes `shell: true` on `win32` only. The argument list is a compile-time literal, so
+routing through `cmd.exe` adds no injection surface; POSIX keeps the direct exec rather than
+paying for a shell it does not need.
+
+This is the §1 trap in a new costume — a check that reports a problem it is not actually
+measuring. It differs from §10's three defects in one way worth naming: those were silent, and
+this one was loud. It failed in the user's face on every run, and still survived, because
+nothing in the repository had ever executed `bootstrap.mjs` on the platform in question.
+
+### 11.2 Why no existing check could catch it
+
+`verify-repo.mjs` ran `bootstrap.mjs` through `node --check` and nothing further. A file that
+parses can still be wrong on an entire operating system, and this one was. Section 12
+(*Installer behaviour*) now runs the installer for real against a throwaway `--home=` dir.
+
+The version probe is exercised with a **stub `claude` placed on `PATH`** — `claude.cmd` on
+Windows, a `0755` shell script elsewhere — reporting a version above any plausible floor. That
+keeps the check honest without requiring Claude Code to be installed on the machine running it,
+which is what makes it viable in CI. A negative case runs the same probe with an empty directory
+as `PATH` and requires the `is claude on PATH?` message to survive, so the assertion cannot be
+satisfied by a probe that reports success without looking.
+
+### 11.3 Verification performed on this round
+
+- `node verify-repo.mjs`: **102 of 102**, exit 0 (was 99 before this round).
+- The new check was confirmed to catch the defect rather than trusted: reverting `shell:` to
+  `false` and re-running turned `doctor resolves \`claude\` on PATH and reports its version`
+  red, and restoring it turned it green. This is the mutation discipline §10.6 established.
+- `node bootstrap.mjs doctor` on Windows 11 / Node 22 / Claude Code 2.1.221 now reports
+  `PASS  Claude Code >= 2.1.219 — 2.1.221`, where it previously reported the `ENOENT` failure
+  above. This is the **first verification of this package recorded on Windows**; every prior
+  round in this document was performed on macOS, while `README.md` claimed all three platforms.
+- `node --check` passes on `bootstrap.mjs`, `verify-repo.mjs`, and all seven hooks, one
+  invocation per file.
+- **Not verified by hand: the POSIX branch of the new section.** The fix itself is a no-op
+  there — `shell: false` is already Node's default, so that path is byte-identical to before —
+  but the `0755` shell stub was written on Windows and never executed on macOS or Linux. The
+  `.github/workflows/verify.yml` matrix covers it; this entry records that the coverage is the
+  workflow's, not the author's.
+- One measurement error, in the §10.6 tradition: the negative case initially left the stub's own
+  directory on `PATH`, so `claude` was still resolvable and the check failed for the opposite of
+  the reason it appeared to. A negative control that cannot actually reach the negative state
+  tests nothing — the same class of error as the `/private/tmp` reading above.
